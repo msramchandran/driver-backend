@@ -200,7 +200,7 @@ app.post('/register', upload.any(), async (req, res) => {
       return res.status(400).json({ error: "userData or uid is missing from request" });
     }
 
-    const baseUrl = "https://plow-strangle-edition.ngrok-free.dev"; 
+    const baseUrl = "http://43.205.135.3:3000"; 
 
     if (req.files && req.files.length > 0) {
         req.files.forEach(file => {
@@ -956,7 +956,7 @@ app.post('/api/admin/upload-apk', upload.single('apk'), async (req, res) => {
     res.status(200).json({ 
       message: `APK version ${versionName} uploaded and published successfully!`, 
       release,
-      url: `https://plow-strangle-edition.ngrok-free.dev/uploads/${versionedFileName}` 
+      url: `http://43.205.135.3:3000/uploads/${versionedFileName}` 
     });
   } catch (error) {
     console.error("❌ APK Upload Error:", error);
