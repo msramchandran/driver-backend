@@ -77,6 +77,26 @@ const userSchema = new mongoose.Schema({
   forceUpdate: { type: Boolean, default: false },
   appVersion: { type: String, default: '1.0.0' },
   createdAt: { type: Date, default: Date.now },
+  // 💰 Wallet & Referrals
+  walletBalance: { type: Number, default: 0 },
+  hasReceivedSignupBonus: { type: Boolean, default: false },
+  referralCode: { type: String },
+  driverReferralCount: { type: Number, default: 0 },
+  customerReferralCount: { type: Number, default: 0 },
+  promoTripsPoints: { type: Number, default: 0 },
+  usedReferralCodes: [{ type: String }],
+  walletTransactions: [
+    {
+      amount: Number,
+      description: String,
+      date: { type: Date, default: Date.now }
+    }
+  ],
+  lastAutoPassDate: { type: String },
+  // 🗑️ Account Deletion Tracking
+  isDeleted: { type: Boolean, default: false },
+  deleteReason: { type: String, default: '' },
+  deletedAt: { type: Date },
   dutyHistory: [
     {
       startedAt: { type: Date },
@@ -128,6 +148,8 @@ const rideSchema = new mongoose.Schema({
   pickup:         { type: String, default: '' },
   drop:           { type: String, default: '' },
   fare:           { type: String, default: '₹0' },
+  promoApplied:   { type: Boolean, default: false },
+  promoDiscount:  { type: Number, default: 0 },
   distance:       { type: String, default: '' },
   lat:            { type: Number, default: 0 },  // Customer pickup latitude
   lng:            { type: Number, default: 0 },  // Customer pickup longitude
@@ -192,10 +214,33 @@ app.post('/register', upload.any(), async (req, res) => {
         });
     }
 
-    const user = await User.findOneAndUpdate(
+    let user = await User.findOne({ uid: userData.uid });
+    const isNewRegistration = !user || !user.hasReceivedSignupBonus;
+
+    let updateData = { ...userData, isRegistered: true, status: 'pending' };
+
+    if (isNewRegistration) {
+      // Generate Referral Code: First 3 letters of name + last 3 of phone + 2 random digits to prevent collisions
+      const namePart = (userData.fullName || 'DRI').substring(0, 3).toUpperCase();
+      const phonePart = (userData.phone || '000').slice(-3);
+      const referralCode = `${namePart}${phonePart}${Math.floor(10 + Math.random() * 90)}`;
+      
+      updateData.referralCode = referralCode;
+      updateData.hasReceivedSignupBonus = true;
+      updateData.walletBalance = 100;
+      updateData.walletTransactions = [
+        {
+          amount: 100,
+          description: "100 point credited your wallet",
+          date: new Date()
+        }
+      ];
+    }
+
+    user = await User.findOneAndUpdate(
       { uid: userData.uid },
-      { ...userData, isRegistered: true, status: 'pending' },
-      { upsert: true, returnDocument: 'after' }
+      updateData,
+      { upsert: true, new: true }
     );
     console.log("✅ Registration Successful for UID:", userData.uid);
     res.status(200).json({ message: "Success!", user });
@@ -275,7 +320,140 @@ app.post('/user/:uid/reset', async (req, res) => {
   }
 });
 
-// 🆕 Admin API - Get dashboard summary statistics
+// 💰 Driver Apply Referral API
+app.post('/api/driver/:uid/apply-referral', async (req, res) => {
+  try {
+    const { uid } = req.params;
+    const { referralCode } = req.body;
+
+    if (!referralCode) {
+      return res.status(400).json({ error: "Referral code is required" });
+    }
+
+    // Find current driver
+    const currentDriver = await User.findOne({ uid });
+    if (!currentDriver) {
+      return res.status(404).json({ error: "Driver not found" });
+    }
+
+    // 1. Check if driver is trying to use their own referral code
+    if (currentDriver.referralCode === referralCode) {
+      return res.status(400).json({ error: "You cannot apply your own referral code" });
+    }
+
+    // 2. Check if driver already used this specific referral code
+    if (currentDriver.usedReferralCodes && currentDriver.usedReferralCodes.includes(referralCode)) {
+      return res.status(400).json({ error: "Referral ID already used" });
+    }
+
+    // 3. Find the owner of the referral code
+    const referrer = await User.findOne({ referralCode });
+    if (!referrer) {
+      return res.status(404).json({ error: "Invalid Referral ID" });
+    }
+
+    // Success! Update current driver
+    currentDriver.walletBalance = (currentDriver.walletBalance || 0) + 10;
+    if (!currentDriver.usedReferralCodes) currentDriver.usedReferralCodes = [];
+    currentDriver.usedReferralCodes.push(referralCode);
+    if (!currentDriver.walletTransactions) currentDriver.walletTransactions = [];
+    currentDriver.walletTransactions.push({
+      amount: 10,
+      description: `10 points earned using referral code ${referralCode}`,
+      date: new Date()
+    });
+    await currentDriver.save();
+
+    // Update referrer
+    referrer.driverReferralCount = (referrer.driverReferralCount || 0) + 1;
+    // Optional: give referrer 10 points too (not strictly requested but usually done)
+    referrer.walletBalance = (referrer.walletBalance || 0) + 10;
+    if (!referrer.walletTransactions) referrer.walletTransactions = [];
+    referrer.walletTransactions.push({
+      amount: 10,
+      description: `10 points earned from driver signup (${currentDriver.fullName})`,
+      date: new Date()
+    });
+    await referrer.save();
+
+    res.status(200).json({ 
+      message: "Referral applied successfully!", 
+      walletBalance: currentDriver.walletBalance,
+      transactions: currentDriver.walletTransactions
+    });
+
+  } catch (error) {
+    console.error("❌ Apply Referral Error:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 🎁 Driver apply customer's referral code
+app.post('/api/driver/:uid/apply-customer-referral', async (req, res) => {
+  try {
+    const { uid } = req.params;
+    const { customerReferralCode } = req.body;
+
+    if (!customerReferralCode) {
+      return res.status(400).json({ error: "Customer Referral code is required" });
+    }
+
+    const currentDriver = await User.findOne({ uid });
+    if (!currentDriver) {
+      return res.status(404).json({ error: "Driver not found" });
+    }
+
+    // Check if driver has already used this code
+    if (currentDriver.usedReferralCodes && currentDriver.usedReferralCodes.includes(customerReferralCode)) {
+      return res.status(400).json({ error: "You have already used this referral code!" });
+    }
+
+    // Find the customer with this code
+    const customer = await Customer.findOne({ referralCode: customerReferralCode });
+    if (!customer) {
+      return res.status(404).json({ error: "Invalid customer referral code!" });
+    }
+
+    // Check if customer code is already used
+    if (customer.isReferralUsed) {
+      return res.status(400).json({ error: "This customer referral code has already been used." });
+    }
+
+    // Give the driver 10 points
+    currentDriver.walletBalance = (currentDriver.walletBalance || 0) + 10;
+    if (!currentDriver.usedReferralCodes) currentDriver.usedReferralCodes = [];
+    currentDriver.usedReferralCodes.push(customerReferralCode);
+    
+    // Increment customer referral count for the driver
+    currentDriver.customerReferralCount = (currentDriver.customerReferralCount || 0) + 1;
+    
+    if (!currentDriver.walletTransactions) currentDriver.walletTransactions = [];
+    currentDriver.walletTransactions.push({
+      amount: 10,
+      description: `10 points earned using customer referral code ${customerReferralCode}`,
+      date: new Date()
+    });
+    
+    await currentDriver.save();
+
+    // Mark customer's code as used and award them 100 promo points
+    customer.isReferralUsed = true;
+    customer.promoPoints = 100; // Customer gets 100 promo points (5 trips * 20 points)
+    await customer.save();
+
+    res.status(200).json({ 
+      message: "Customer Referral applied successfully!", 
+      walletBalance: currentDriver.walletBalance,
+      transactions: currentDriver.walletTransactions
+    });
+
+  } catch (error) {
+    console.error("❌ Apply Customer Referral Error:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 🌟 Admin API - Get dashboard summary statistics
 app.get('/api/admin/dashboard', async (req, res) => {
   try {
     const completedRides = await Ride.countDocuments({ status: 'finished' });
@@ -310,6 +488,61 @@ app.get('/api/driver-dashboard/stats', async (req, res) => {
   } catch (err) {
     console.error('❌ Error fetching dashboard stats:', err.message);
     res.status(500).json({ error: err.message });
+  }
+});
+// 🆕 Admin API - Get all registered customers
+app.get('/api/admin/customers', async (req, res) => {
+  try {
+    const customers = await Customer.find({ isRegistered: true }).sort({ createdAt: -1 });
+    
+    const formatted = customers.map(c => {
+      return {
+        id: c.uid,
+        name: c.fullName || 'Unknown Customer',
+        phone: c.phone || 'N/A',
+        profileImage: c.profileImageUrl || 'https://via.placeholder.com/150',
+        referralCode: c.referralCode || 'N/A',
+        isDeleted: c.isDeleted || false,
+        tripCount: c.tripHistory ? c.tripHistory.length : 0,
+        savedLocationsCount: c.savedLocations ? c.savedLocations.length : 0,
+        createdAt: c.createdAt
+      };
+    });
+
+    res.status(200).json(formatted);
+  } catch (error) {
+    console.error('❌ Error fetching customers:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 🆕 Admin API - Block Customer
+app.post('/api/admin/customers/:customerId/block', async (req, res) => {
+  try {
+    const customer = await Customer.findOneAndUpdate(
+      { uid: req.params.customerId },
+      { isDeleted: true, deleteReason: 'Blocked by Admin', deletedAt: new Date() },
+      { new: true }
+    );
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+    res.status(200).json({ message: 'Customer blocked successfully' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 🆕 Admin API - Unblock Customer
+app.post('/api/admin/customers/:customerId/unblock', async (req, res) => {
+  try {
+    const customer = await Customer.findOneAndUpdate(
+      { uid: req.params.customerId },
+      { isDeleted: false, deleteReason: '', $unset: { deletedAt: "" } },
+      { new: true }
+    );
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+    res.status(200).json({ message: 'Customer unblocked successfully' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -355,6 +588,37 @@ app.get('/api/admin/drivers', async (req, res) => {
         if (count > 0) duplicates.idNumber = true;
       }
 
+      // Fetch driver ratings from Ride collection
+      const driverRides = await Ride.find({ driverUid: user.uid, rating: { $gt: 0 } });
+      let totalRatings = driverRides.length;
+      let averageRating = 0;
+      let goodReasons = [];
+      let badReasons = [];
+      let goodReasonCounts = {};
+      let badReasonCounts = {};
+
+      if (totalRatings > 0) {
+        let sum = 0;
+        driverRides.forEach(r => {
+          sum += r.rating;
+          if (r.ratingReason) {
+            const reasons = r.ratingReason.split(',').map(s => s.trim()).filter(s => s);
+            reasons.forEach(reason => {
+              if (r.rating < 3) {
+                badReasonCounts[reason] = (badReasonCounts[reason] || 0) + 1;
+              } else {
+                goodReasonCounts[reason] = (goodReasonCounts[reason] || 0) + 1;
+              }
+            });
+          }
+        });
+        averageRating = Number((sum / totalRatings).toFixed(1));
+        
+        // Convert to array of objects
+        goodReasons = Object.entries(goodReasonCounts).map(([reason, count]) => ({ reason, count }));
+        badReasons = Object.entries(badReasonCounts).map(([reason, count]) => ({ reason, count }));
+      }
+
       return {
         id: user.uid,
         name: user.fullName || 'Unknown Driver',
@@ -374,6 +638,10 @@ app.get('/api/admin/drivers', async (req, res) => {
         idFront: user.idFrontUrl || '',
         idBack: user.idBackUrl || '',
         duplicates,
+        averageRating,
+        totalRatings,
+        goodReasons,
+        badReasons,
       };
     }));
 
@@ -1030,15 +1298,18 @@ io.on('connection', (socket) => {
           distance:     rideData.distance || '',
           lat:          rideData.lat     || 0,
           lng:          rideData.lng     || 0,
-          dropLat:      rideData.dropLat || 0,  // ✅ FIX: Save drop latitude
-          dropLng:      rideData.dropLng || 0,  // ✅ FIX: Save drop longitude
+          dropLat:      rideData.dropLat || 0,
+          dropLng:      rideData.dropLng || 0,
           otp:          rideData.otp || '',
           vehicleType:  rideData.vehicleType || '',
+          promoApplied: rideData.promoApplied || false,
+          promoDiscount: rideData.promoDiscount || 0,
           status:       'requested',
           createdAt:    new Date(),
         },
         { upsert: true, new: true }
       );
+      
       console.log(`✅ Ride ${rideId} saved to DB (requested, searchId: ${currentSearchId}) dropLat=${rideData.dropLat} dropLng=${rideData.dropLng}`);
     } catch (err) {
       console.error('❌ DB save requestRide error:', err.message);
@@ -1155,6 +1426,8 @@ io.on('connection', (socket) => {
         // ✅ FIX: Include ALL ride data (coordinates + drop info) in confirmationData
         // This ensures TripDetailsScreen and DropLocationScreen get the correct locations
         const rideCache = rides[rideId];
+        const driverData = await User.findOne({ uid: updatedRide.driverUid });
+        
         const confirmationData = {
           // Identity
           id:            rideId,
@@ -1162,6 +1435,8 @@ io.on('connection', (socket) => {
           driverUid:     updatedRide.driverUid,
           driverName:    updatedRide.driverName,
           vehicleNumber: updatedRide.vehicleNumber,
+          profileImageUrl: driverData ? driverData.profileImageUrl : '',
+          phone:         driverData ? driverData.phone : '',
           // Customer info
           customerId:    rideCache.userId || rideCache.customerId || '',
           userId:        rideCache.userId || rideCache.customerId || '',
@@ -1179,7 +1454,9 @@ io.on('connection', (socket) => {
           fare:          rideCache.fare     || updatedRide.fare     || '₹0',
           distance:      rideCache.distance || updatedRide.distance || '',
           otp:           rideCache.otp      || updatedRide.otp      || '',
-          vehicleType:   rideCache.vehicleType || updatedRide.vehicleType || '',
+          vehicleType:   rideCache.vehicleType || updatedRide.vehicleType || (driverData ? driverData.selectedVehicle : ''),
+          promoApplied:  rideCache.promoApplied || false,
+          promoDiscount: rideCache.promoDiscount || 0,
         };
 
         rides[rideId].status = 'accepted';
@@ -1229,7 +1506,7 @@ io.on('connection', (socket) => {
 
       // Save earnings to driver's trip history in User collection
       if (ride && ride.driverUid) {
-        await User.findOneAndUpdate(
+        let driver = await User.findOneAndUpdate(
           { uid: ride.driverUid },
           {
             $push: {
@@ -1247,9 +1524,67 @@ io.on('connection', (socket) => {
                 $slice: -100,  // keep last 100 trips
               }
             }
-          }
+          },
+          { new: true }
         );
         console.log(`✅ Earnings saved for driver ${ride.driverUid}`);
+
+        // --- Azhai Auto Pass Logic ---
+        if (driver) {
+          const startOfToday = new Date();
+          startOfToday.setHours(0, 0, 0, 0);
+          
+          const todaysTrips = await Ride.countDocuments({
+             driverUid: driver.uid,
+             status: 'finished',
+             finishedAt: { $gte: startOfToday }
+          });
+
+          const todayDateString = startOfToday.toISOString().split('T')[0];
+
+          if (todaysTrips > 3 && driver.lastAutoPassDate !== todayDateString) {
+             driver.walletBalance = (driver.walletBalance || 0) - 10;
+             driver.lastAutoPassDate = todayDateString;
+             if (!driver.walletTransactions) driver.walletTransactions = [];
+             driver.walletTransactions.push({
+               amount: -10,
+               description: "Azhai Auto Pass: 10 points deducted for >3 trips today",
+               date: new Date()
+             });
+             await driver.save();
+             console.log(`📉 Azhai Auto Pass applied for driver ${driver.uid} (Trip #${todaysTrips} today)`);
+          }
+        }
+        
+        // --- Promo Earn Logic ---
+        if (driver && ride.promoApplied) {
+           const pointsToAdd = parseInt(ride.promoDiscount, 10) || 20;
+           driver.promoTripsPoints = (driver.promoTripsPoints || 0) + pointsToAdd;
+           driver.walletBalance = (driver.walletBalance || 0) + pointsToAdd;
+           if (!driver.walletTransactions) driver.walletTransactions = [];
+           driver.walletTransactions.push({
+             amount: ride.promoDiscount || 20,
+             description: `Earned ${ride.promoDiscount || 20} points from Customer Promo on Ride ${ride.rideId}`,
+             date: new Date()
+           });
+           await driver.save();
+           console.log(`💰 Driver ${driver.uid} earned ${ride.promoDiscount || 20} points from customer promo.`);
+        }
+      }
+
+      // --- Customer Promo Deduction Logic ---
+      if (ride && ride.promoApplied) {
+        const custId = ride.customerId || ride.userId;
+        if (custId) {
+          const cust = await Customer.findOne({ uid: custId });
+          const discountToApply = ride.promoDiscount || 20;
+          if (cust && cust.promoPoints >= discountToApply) {
+            cust.promoPoints -= discountToApply;
+            cust.promoTripsUsed = (cust.promoTripsUsed || 0) + 1;
+            await cust.save();
+            console.log(`⭐ Customer ${custId} deducted ${discountToApply} promo points for completed Ride ${rideId}. Remaining: ${cust.promoPoints}`);
+          }
+        }
       }
     } catch (err) {
       console.error('❌ DB update rideFinished error:', err.message);
@@ -1531,6 +1866,10 @@ const customerSchema = new mongoose.Schema({
   profileImageUrl: { type: String, default: '' },
   isRegistered: { type: Boolean, default: false },
   createdAt: { type: Date, default: Date.now },
+  referralCode: { type: String, unique: true, sparse: true },
+  isReferralUsed: { type: Boolean, default: false },
+  promoPoints: { type: Number, default: 0 },
+  promoTripsUsed: { type: Number, default: 0 },
   // 🚖 Trip History - max 10, oldest auto-deleted
   tripHistory: [
     {
@@ -1585,9 +1924,21 @@ app.post('/customer/register', async (req, res) => {
       return res.status(400).json({ error: "uid is required" });
     }
 
+    let existingCustomer = await Customer.findOne({ uid: uid });
+    let referralCode = existingCustomer?.referralCode;
+
+    if (!referralCode) {
+      const namePart = (fullName || 'CUS').substring(0, 3).toUpperCase();
+      const phonePart = (phone || '000').slice(-3);
+      referralCode = `${namePart}${phonePart}${Math.floor(10 + Math.random() * 90)}`;
+    }
+
     const customer = await Customer.findOneAndUpdate(
       { uid: uid },
-      { uid, fullName, phone, email, isRegistered: true },
+      { 
+        uid, fullName, phone, email, isRegistered: true, isDeleted: false,
+        referralCode: referralCode // ALWAYS SET IT SO OLD USERS GET IT TOO
+      },
       { upsert: true, new: true }
     );
 
@@ -1816,6 +2167,82 @@ app.delete('/customer/:uid/delete-location/:label', async (req, res) => {
 
 
 // =====================================================
+// 🗑️ DELETE ACCOUNT API — Driver account soft-delete
+// =====================================================
+// DELETE /driver/:uid/delete-account
+app.delete('/driver/:uid/delete-account', async (req, res) => {
+  const { uid } = req.params;
+  const { reason } = req.body;
+
+  console.log(`🗑️ Delete Account request (Driver): UID=${uid}, Reason="${reason}"`);
+
+  if (!uid) {
+    return res.status(400).json({ error: 'uid is required' });
+  }
+
+  try {
+    // 1️⃣ Soft-delete Driver document
+    const driver = await User.findOneAndUpdate(
+      { uid },
+      {
+        isDeleted:    true,
+        deleteReason: reason || 'Not specified',
+        deletedAt:    new Date(),
+      },
+      { new: true }
+    );
+
+    if (!driver) {
+      return res.status(404).json({ error: 'Driver not found' });
+    }
+
+    // 2️⃣ Cancel driver's active rides (if any)
+    const activeRide = await Ride.findOne({
+      driverUid: uid,
+      status: { $in: ['accepted', 'arrived', 'started'] }
+    });
+
+    if (activeRide) {
+      activeRide.status = 'canceled';
+      activeRide.cancelReason = 'Driver deleted account';
+      await activeRide.save();
+      
+      // Notify customer socket if possible
+      io.to(activeRide.rideId).emit('ride_canceled', {
+        rideId: activeRide.rideId,
+        reason: 'Driver deleted account',
+        by: 'driver'
+      });
+      
+      if (rides[activeRide.rideId]) delete rides[activeRide.rideId];
+      console.log(`🚗 Active ride ${activeRide.rideId} canceled - driver account deleted`);
+    }
+
+    // 3️⃣ Remove from active sockets
+    // Find socket.id for this driverUid
+    for (const [socketId, activeUid] of Object.entries(activeDrivers)) {
+      if (activeUid === uid) {
+        delete activeDrivers[socketId];
+      }
+    }
+    if (activePublicDrivers[uid]) {
+      delete activePublicDrivers[uid];
+    }
+
+    console.log(`✅ Driver Account soft-deleted: UID=${uid}, Reason="${reason}"`);
+    
+    res.status(200).json({
+      message: 'Account deleted successfully',
+      deletedAt: driver.deletedAt,
+      reason: driver.deleteReason,
+    });
+  } catch (error) {
+    console.error('❌ Delete Account Error (Driver):', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// =====================================================
 // 🗑️ DELETE ACCOUNT API — Customer account soft-delete
 // =====================================================
 // DELETE /customer/:uid/delete-account
@@ -1893,3 +2320,20 @@ server.listen(PORT, () => {
   console.log(`🚀 Server is running on port ${PORT}`);
 });
 
+app.get('/api/fix-wallet', async (req, res) => {
+  try {
+    const drivers = await User.find({ promoTripsPoints: { $gt: 0 } });
+    let fixed = 0;
+    for (let d of drivers) {
+      const expected = (d.hasReceivedSignupBonus ? 100 : 0) + (d.driverReferralCount || 0) * 10 + (d.customerReferralCount || 0) * 10 + d.promoTripsPoints;
+      if (d.walletBalance < expected) {
+        d.walletBalance = expected;
+        await d.save();
+        fixed++;
+      }
+    }
+    res.json({ message: "Fixed " + fixed + " drivers' wallet balances!" });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
