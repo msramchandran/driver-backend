@@ -1117,6 +1117,11 @@ io.on('connection', (socket) => {
   socket.on('identifyDriver', (data) => {
     const driverUid = data?.driverUid || data?.driverId || '';
     const isOffDuty = data?.isOffDuty ?? false;
+    
+    // Attach driverUid to the socket directly so we can find them even if they are off-duty (e.g. during an active ride)
+    if (driverUid) {
+      socket.driverUid = driverUid;
+    }
 
     if (isOffDuty) {
       delete activeDrivers[socket.id];
@@ -1658,11 +1663,13 @@ io.on('connection', (socket) => {
         const driverUid = rides[rideId].driverUid;
         let currentDriverSocketId = rides[rideId].driverSocketId;
         
-        // Find latest socket ID in case the driver reconnected
+        // Find latest socket ID in case the driver reconnected (works even if off-duty)
         if (driverUid) {
-          const activeDriverEntry = Object.entries(activeDrivers).find(([sId, data]) => data.driverUid === driverUid);
-          if (activeDriverEntry) {
-            currentDriverSocketId = activeDriverEntry[0];
+          for (const [sId, s] of io.sockets.sockets.entries()) {
+            if (s.driverUid === driverUid) {
+              currentDriverSocketId = sId;
+              break;
+            }
           }
         }
         
