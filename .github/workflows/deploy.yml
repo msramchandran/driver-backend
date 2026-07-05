@@ -1,0 +1,22 @@
+name: Deploy to AWS EC2
+
+on:
+  push:
+    branches:
+      - main # உங்கள் மெயின் பிராஞ்ச் பெயர் 'master' ஆக இருந்தால், இங்கே 'master' என மாற்றிக்கொள்ளுங்கள்
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploying to EC2
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd /home/ubuntu/driver-backend  # IMPORTANT: உங்கள் AWS சர்வரில் ப்ராஜெக்ட் எங்கு உள்ளதோ அந்த Path-ஐ சரியாக கொடுக்கவும்
+            git pull origin main
+            npm install
+            pm2 restart all
