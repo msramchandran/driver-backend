@@ -1655,8 +1655,19 @@ io.on('connection', (socket) => {
       
       // Emit to the other party (customer or driver app)
       if (sender === 'customer') {
-        if (rides[rideId].driverSocketId) {
-          io.to(rides[rideId].driverSocketId).emit('receiveMessage', { rideId, message });
+        const driverUid = rides[rideId].driverUid;
+        let currentDriverSocketId = rides[rideId].driverSocketId;
+        
+        // Find latest socket ID in case the driver reconnected
+        if (driverUid) {
+          const activeDriverEntry = Object.entries(activeDrivers).find(([sId, data]) => data.driverUid === driverUid);
+          if (activeDriverEntry) {
+            currentDriverSocketId = activeDriverEntry[0];
+          }
+        }
+        
+        if (currentDriverSocketId) {
+          io.to(currentDriverSocketId).emit('receiveMessage', { rideId, message });
         }
       } else {
         io.emit('receiveMessage', { rideId, message }); // fallback simple broadcast for driver -> customer
