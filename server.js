@@ -1654,7 +1654,13 @@ io.on('connection', (socket) => {
       rides[rideId].chat.push(message);
       
       // Emit to the other party (customer or driver app)
-      io.emit('receiveMessage', { rideId, message }); // simple broadcast, client filters by rideId
+      if (sender === 'customer') {
+        if (rides[rideId].driverSocketId) {
+          io.to(rides[rideId].driverSocketId).emit('receiveMessage', { rideId, message });
+        }
+      } else {
+        io.emit('receiveMessage', { rideId, message }); // fallback simple broadcast for driver -> customer
+      }
     }
   });
 
