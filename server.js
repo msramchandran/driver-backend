@@ -188,11 +188,13 @@ const supportTicketSchema = new mongoose.Schema({
   description:   { type: String, default: '' },      // optional extra text by customer
   rideId:        { type: String, default: '' },      // optional linked ride
   rideDetails:   {
-    pickup:     { type: String, default: '' },
-    drop:       { type: String, default: '' },
-    fare:       { type: String, default: '' },
-    driverName: { type: String, default: '' },
-    date:       { type: String, default: '' },
+    pickup:         { type: String, default: '' },
+    drop:           { type: String, default: '' },
+    fare:           { type: String, default: '' },
+    driverName:     { type: String, default: '' },
+    vehicleNumber:  { type: String, default: '' },
+    driverPhone:    { type: String, default: '' },
+    date:           { type: String, default: '' },
   },
   status: {
     type: String,
@@ -2394,6 +2396,32 @@ app.post('/customer/:uid/raise-ticket', async (req, res) => {
 
     const ticketId = `TKT-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
+    // 🚗 Auto-fetch driver details from Ride + User if rideId is provided
+    let enrichedRideDetails = rideDetails || {};
+    if (rideId) {
+      try {
+        const rideDoc = await Ride.findOne({ rideId });
+        if (rideDoc) {
+          // Fill in vehicleNumber from Ride if not already in rideDetails
+          if (!enrichedRideDetails.vehicleNumber && rideDoc.vehicleNumber) {
+            enrichedRideDetails.vehicleNumber = rideDoc.vehicleNumber;
+          }
+          // Fetch driver phone from User collection
+          if (rideDoc.driverUid) {
+            const driverUser = await User.findOne({ uid: rideDoc.driverUid }, 'phone fullName');
+            if (driverUser) {
+              enrichedRideDetails.driverPhone = driverUser.phone || '';
+              if (!enrichedRideDetails.driverName && driverUser.fullName) {
+                enrichedRideDetails.driverName = driverUser.fullName;
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.error('⚠️ Could not enrich ride details:', err.message);
+      }
+    }
+
     const ticket = new SupportTicket({
       ticketId,
       customerId:    uid,
@@ -2403,7 +2431,7 @@ app.post('/customer/:uid/raise-ticket', async (req, res) => {
       subReason,
       description:   description || '',
       rideId:        rideId      || '',
-      rideDetails:   rideDetails || {},
+      rideDetails:   enrichedRideDetails,
       status: 'open',
     });
 
