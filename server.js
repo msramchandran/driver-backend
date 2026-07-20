@@ -1933,6 +1933,7 @@ const customerSchema = new mongoose.Schema({
   // 🚖 Trip History - max 10, oldest auto-deleted
   tripHistory: [
     {
+      rideId:        { type: String, default: '' },   // ✅ FIX: rideId for support ticket linking
       driverUid:    { type: String },
       driverName:   { type: String },
       vehicleNumber:{ type: String },
