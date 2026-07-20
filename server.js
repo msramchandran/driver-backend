@@ -175,6 +175,40 @@ const rideSchema = new mongoose.Schema({
 
 const Ride = mongoose.model('Ride', rideSchema);
 
+// =====================================================
+// 🎫 SUPPORT TICKET SCHEMA
+// =====================================================
+const supportTicketSchema = new mongoose.Schema({
+  ticketId:      { type: String, required: true, unique: true },
+  customerId:    { type: String, required: true },
+  customerName:  { type: String, default: '' },
+  customerPhone: { type: String, default: '' },
+  category:      { type: String, required: true },   // e.g. "Driver Behavior"
+  subReason:     { type: String, required: true },   // e.g. "Rude driver"
+  description:   { type: String, default: '' },      // optional extra text by customer
+  rideId:        { type: String, default: '' },      // optional linked ride
+  rideDetails:   {
+    pickup:     { type: String, default: '' },
+    drop:       { type: String, default: '' },
+    fare:       { type: String, default: '' },
+    driverName: { type: String, default: '' },
+    date:       { type: String, default: '' },
+  },
+  status: {
+    type: String,
+    enum: ['open', 'in_progress', 'resolved', 'closed'],
+    default: 'open'
+  },
+  adminReplies: [{
+    message:   { type: String },
+    sentAt:    { type: Date, default: Date.now },
+    adminName: { type: String, default: 'Admin' },
+  }],
+  createdAt:  { type: Date, default: Date.now },
+  updatedAt:  { type: Date, default: Date.now },
+});
+const SupportTicket = mongoose.model('SupportTicket', supportTicketSchema);
+
 const rides = {};
 const activeDrivers = {};
 const activePublicDrivers = {}; // 🆕 Memory store for dashboard public sharing drivers
@@ -2332,6 +2366,177 @@ app.delete('/customer/:uid/delete-account', async (req, res) => {
     });
   } catch (error) {
     console.error('❌ Delete Account Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+// =====================================================
+// 🎫 SUPPORT TICKET APIs
+// =====================================================
+
+// 1️⃣ Customer: Raise a new support ticket
+// POST /customer/:uid/raise-ticket
+app.post('/customer/:uid/raise-ticket', async (req, res) => {
+  try {
+    const { uid } = req.params;
+    const { category, subReason, description, rideId, rideDetails } = req.body;
+
+    if (!category || !subReason) {
+      return res.status(400).json({ error: 'category and subReason are required' });
+    }
+
+    // Get customer info
+    const customer = await Customer.findOne({ uid });
+    if (!customer) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
+
+    const ticketId = `TKT-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+
+    const ticket = new SupportTicket({
+      ticketId,
+      customerId:    uid,
+      customerName:  customer.fullName || 'Customer',
+      customerPhone: customer.phone    || '',
+      category,
+      subReason,
+      description:   description || '',
+      rideId:        rideId      || '',
+      rideDetails:   rideDetails || {},
+      status: 'open',
+    });
+
+    await ticket.save();
+    console.log(`🎫 New support ticket created: ${ticketId} by ${customer.fullName}`);
+    res.status(200).json({ success: true, ticketId, ticket });
+  } catch (error) {
+    console.error('❌ Raise Ticket Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 2️⃣ Customer: Get own tickets + admin replies
+// GET /customer/:uid/my-tickets
+app.get('/customer/:uid/my-tickets', async (req, res) => {
+  try {
+    const { uid } = req.params;
+    const tickets = await SupportTicket.find({ customerId: uid }).sort({ createdAt: -1 });
+    res.status(200).json({ tickets });
+  } catch (error) {
+    console.error('❌ Get My Tickets Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 3️⃣ Admin: Get all support tickets
+// GET /api/admin/support-tickets
+app.get('/api/admin/support-tickets', async (req, res) => {
+  try {
+    const { status } = req.query;
+    const filter = status ? { status } : {};
+    const tickets = await SupportTicket.find(filter).sort({ createdAt: -1 });
+    res.status(200).json({ tickets });
+  } catch (error) {
+    console.error('❌ Admin Get Tickets Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 4️⃣ Admin: Get ticket stats (open/in_progress/resolved/closed counts)
+// GET /api/admin/support-tickets/stats
+app.get('/api/admin/support-tickets/stats', async (req, res) => {
+  try {
+    const open       = await SupportTicket.countDocuments({ status: 'open' });
+    const in_progress = await SupportTicket.countDocuments({ status: 'in_progress' });
+    const resolved   = await SupportTicket.countDocuments({ status: 'resolved' });
+    const closed     = await SupportTicket.countDocuments({ status: 'closed' });
+    const total      = await SupportTicket.countDocuments();
+    res.status(200).json({ total, open, in_progress, resolved, closed });
+  } catch (error) {
+    console.error('❌ Ticket Stats Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 5️⃣ Admin: Update ticket status
+// PATCH /api/admin/support-tickets/:id/status
+app.patch('/api/admin/support-tickets/:id/status', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+    const validStatuses = ['open', 'in_progress', 'resolved', 'closed'];
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({ error: 'Invalid status' });
+    }
+
+    const ticket = await SupportTicket.findOneAndUpdate(
+      { ticketId: id },
+      { status, updatedAt: new Date() },
+      { new: true }
+    );
+    if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+
+    // Notify customer via Socket.IO
+    io.emit('ticketStatusUpdate', {
+      customerId: ticket.customerId,
+      ticketId:   ticket.ticketId,
+      status:     ticket.status,
+    });
+
+    console.log(`🎫 Ticket ${id} status → ${status}`);
+    res.status(200).json({ success: true, ticket });
+  } catch (error) {
+    console.error('❌ Update Ticket Status Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 6️⃣ Admin: Send reply message to customer (with Socket.IO real-time notification)
+// POST /api/admin/support-tickets/:id/reply
+app.post('/api/admin/support-tickets/:id/reply', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { message, adminName, status } = req.body;
+
+    if (!message || !message.trim()) {
+      return res.status(400).json({ error: 'Message is required' });
+    }
+
+    const reply = {
+      message:   message.trim(),
+      sentAt:    new Date(),
+      adminName: adminName || 'Admin',
+    };
+
+    const updateData = {
+      $push:    { adminReplies: reply },
+      updatedAt: new Date(),
+    };
+    // Optionally update status when replying
+    if (status) updateData.status = status;
+
+    const ticket = await SupportTicket.findOneAndUpdate(
+      { ticketId: id },
+      updateData,
+      { new: true }
+    );
+    if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+
+    // 🔔 Real-time notification to customer app via Socket.IO
+    io.emit('ticketReply', {
+      customerId: ticket.customerId,
+      ticketId:   ticket.ticketId,
+      message:    reply.message,
+      adminName:  reply.adminName,
+      status:     ticket.status,
+      sentAt:     reply.sentAt,
+    });
+
+    console.log(`💬 Admin reply sent for ticket ${id}: "${reply.message}"`);
+    res.status(200).json({ success: true, ticket, reply });
+  } catch (error) {
+    console.error('❌ Admin Reply Error:', error);
     res.status(500).json({ error: error.message });
   }
 });
