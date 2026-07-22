@@ -1314,6 +1314,16 @@ io.on('connection', (socket) => {
     rideData.customerName = customerName;
     rideData.customerPhone = customerPhone;
 
+    // ── 🔴 CRITICAL FIX: Reject duplicate requestRide for already-accepted/started rides ──
+    // If the client re-emits 'requestRide' for a rideId that has already been accepted
+    // (or started/finished), do NOT override the in-memory status back to 'requested'.
+    // This prevents a stale client-side retry timer from resurrecting a completed ride
+    // search loop and causing an accepted ride to eventually time out on the server.
+    if (rides[rideId] && rides[rideId].status !== 'requested') {
+      console.log(`[Ride ${rideId}] ⚠️ Ignoring duplicate requestRide — current status is '${rides[rideId].status}'. Not overriding.`);
+      return;
+    }
+
     // Track search sessions to prevent overlapping retry loops
     const isRetry = !!rides[rideId];
     if (!rides[rideId]) {
@@ -1375,27 +1385,55 @@ io.on('connection', (socket) => {
 
     console.log(`[Ride ${rideId}] vehicleType="${requestedVehicleType}" | eligible drivers within 2km: ${nearby.length}`);
 
-    let index = 0;
-    function sendToNext() {
+    // ── 🏍️ RADIUS-BATCHING (Rapido/Ola style) ───────────────────────────────
+    //
+    // Strategy: split nearby drivers into 3 distance bands and broadcast each
+    // band simultaneously after a delay — giving closest drivers priority while
+    // NOT wasting precious seconds sending one-by-one.
+    //
+    //  Wave 1 →  0 – 0.7 km  →  sent immediately  (@ 0 sec)
+    //  Wave 2 →  0.7 – 1.5 km → sent after 15 sec  (if still unaccepted)
+    //  Wave 3 →  1.5 – 2.0 km → sent after 35 sec  (if still unaccepted)
+    //  Timeout →                 fires  after 60 sec
+    //
+    // Why NOT one-by-one with 2-sec gaps?
+    //   → With 10 drivers, gap-based sends the LAST driver at 20 sec.
+    //   → That last driver only has 40 sec to respond before timeout.
+    //   → Batching gives every driver in each wave the FULL remaining window.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    const wave1 = nearby.filter(d => d.dist <= 0.7);
+    const wave2 = nearby.filter(d => d.dist > 0.7 && d.dist <= 1.5);
+    const wave3 = nearby.filter(d => d.dist > 1.5 && d.dist <= 2.0);
+
+    function broadcastWave(wave, waveNum) {
+      // Stop if ride was already accepted / canceled / timed-out
       if (!rides[rideId] || rides[rideId].status !== 'requested') {
-        console.log(`[Ride ${rideId}] sendToNext stopped: status=${rides[rideId]?.status || 'undefined'}`);
+        console.log(`[Ride ${rideId}] Wave ${waveNum} skipped — status is '${rides[rideId]?.status || 'gone'}'`);
         return;
       }
-      if (rides[rideId].searchId !== currentSearchId) {
-        console.log(`[Ride ${rideId}] sendToNext stopped: searchId mismatch`);
+      if (wave.length === 0) {
+        console.log(`[Ride ${rideId}] Wave ${waveNum} skipped — no drivers in this band`);
         return;
       }
-      if (index >= nearby.length) {
-        console.log(`[Ride ${rideId}] sendToNext finished: sent to all ${nearby.length} eligible drivers`);
-        return;
-      }
-      const driverId = nearby[index].id;
-      console.log(`[Ride ${rideId}] 🚀 Sending to driver ${driverId} (${index + 1}/${nearby.length}, ${nearby[index].dist.toFixed(2)} km, type=${nearby[index].vehicleType})`);
-      io.to(driverId).emit('newRideRequest', rideData);
-      index++;
-      setTimeout(sendToNext, 2000); // 2 seconds between drivers
+      console.log(`[Ride ${rideId}] 🚀 Wave ${waveNum}: broadcasting to ${wave.length} driver(s) [${wave.map(d => `${d.dist.toFixed(2)}km`).join(', ')}]`);
+      wave.forEach(d => io.to(d.id).emit('newRideRequest', rideData));
     }
-    if (nearby.length > 0) sendToNext();
+
+    if (nearby.length === 0) {
+      // No eligible drivers at all — tell customer right away
+      console.log(`[Ride ${rideId}] ⚠️ No eligible drivers within 2km — notifying customer immediately`);
+      io.emit('noDriversFound', { rideId });
+    } else {
+      // Wave 1 — immediate (nearest drivers: 0–0.7 km)
+      broadcastWave(wave1, 1);
+
+      // Wave 2 — after 15 seconds (mid-range: 0.7–1.5 km)
+      setTimeout(() => broadcastWave(wave2, 2), 15000);
+
+      // Wave 3 — after 35 seconds (farthest: 1.5–2.0 km)
+      setTimeout(() => broadcastWave(wave3, 3), 35000);
+    }
 
     // Automatic 1-minute server-side timeout from the start (only on first request)
     if (!isRetry) {
