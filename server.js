@@ -211,6 +211,20 @@ const supportTicketSchema = new mongoose.Schema({
 });
 const SupportTicket = mongoose.model('SupportTicket', supportTicketSchema);
 
+// =====================================================
+// 🎬 TUTORIAL VIDEO SCHEMA — Admin-managed YouTube videos
+// =====================================================
+const tutorialVideoSchema = new mongoose.Schema({
+  title:       { type: String, required: true },
+  description: { type: String, default: '' },
+  youtubeUrl:  { type: String, required: true }, // Full YouTube URL e.g. https://youtu.be/xxxxx
+  order:       { type: Number, default: 0 },     // Display order in app
+  isActive:    { type: Boolean, default: true }, // Show/hide toggle from admin
+  createdAt:   { type: Date, default: Date.now },
+  updatedAt:   { type: Date, default: Date.now },
+});
+const TutorialVideo = mongoose.model('TutorialVideo', tutorialVideoSchema);
+
 const rides = {};
 const activeDrivers = {};
 const activePublicDrivers = {}; // 🆕 Memory store for dashboard public sharing drivers
@@ -2609,9 +2623,112 @@ app.post('/api/admin/support-tickets/:id/reply', async (req, res) => {
 });
 
 // =====================================================
+// 🎬 TUTORIAL VIDEOS API ROUTES
+// =====================================================
+
+// PUBLIC: Flutter app fetches active videos (sorted by order)
+app.get('/api/tutorial-videos', async (req, res) => {
+  try {
+    const videos = await TutorialVideo.find({ isActive: true }).sort({ order: 1, createdAt: 1 });
+    res.status(200).json(videos);
+  } catch (error) {
+    console.error('❌ Tutorial Videos Fetch Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ADMIN: Get all videos (including inactive)
+app.get('/api/admin/tutorial-videos', async (req, res) => {
+  try {
+    const videos = await TutorialVideo.find().sort({ order: 1, createdAt: 1 });
+    res.status(200).json(videos);
+  } catch (error) {
+    console.error('❌ Admin Tutorial Videos Fetch Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ADMIN: Add new video
+app.post('/api/admin/tutorial-videos', async (req, res) => {
+  try {
+    const { title, description, youtubeUrl, order } = req.body;
+    if (!title || !youtubeUrl) {
+      return res.status(400).json({ error: 'title and youtubeUrl are required' });
+    }
+    const video = new TutorialVideo({
+      title: title.trim(),
+      description: (description || '').trim(),
+      youtubeUrl: youtubeUrl.trim(),
+      order: order || 0,
+      isActive: true,
+    });
+    await video.save();
+    console.log('✅ Tutorial Video Added:', title);
+    res.status(201).json({ message: 'Video added successfully', video });
+  } catch (error) {
+    console.error('❌ Add Tutorial Video Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ADMIN: Edit video
+app.put('/api/admin/tutorial-videos/:id', async (req, res) => {
+  try {
+    const { title, description, youtubeUrl, order } = req.body;
+    const video = await TutorialVideo.findByIdAndUpdate(
+      req.params.id,
+      {
+        ...(title && { title: title.trim() }),
+        ...(description !== undefined && { description: description.trim() }),
+        ...(youtubeUrl && { youtubeUrl: youtubeUrl.trim() }),
+        ...(order !== undefined && { order }),
+        updatedAt: new Date(),
+      },
+      { new: true }
+    );
+    if (!video) return res.status(404).json({ error: 'Video not found' });
+    console.log('✅ Tutorial Video Updated:', video.title);
+    res.status(200).json({ message: 'Video updated successfully', video });
+  } catch (error) {
+    console.error('❌ Update Tutorial Video Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ADMIN: Delete video
+app.delete('/api/admin/tutorial-videos/:id', async (req, res) => {
+  try {
+    const video = await TutorialVideo.findByIdAndDelete(req.params.id);
+    if (!video) return res.status(404).json({ error: 'Video not found' });
+    console.log('✅ Tutorial Video Deleted:', video.title);
+    res.status(200).json({ message: 'Video deleted successfully' });
+  } catch (error) {
+    console.error('❌ Delete Tutorial Video Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ADMIN: Toggle video active/inactive
+app.put('/api/admin/tutorial-videos/:id/toggle', async (req, res) => {
+  try {
+    const video = await TutorialVideo.findById(req.params.id);
+    if (!video) return res.status(404).json({ error: 'Video not found' });
+    video.isActive = !video.isActive;
+    video.updatedAt = new Date();
+    await video.save();
+    console.log(`✅ Tutorial Video ${video.isActive ? 'Activated' : 'Deactivated'}:`, video.title);
+    res.status(200).json({ message: `Video ${video.isActive ? 'activated' : 'deactivated'}`, video });
+  } catch (error) {
+    console.error('❌ Toggle Tutorial Video Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// =====================================================
 // 🔚 SERVER START
 // =====================================================
 const PORT = process.env.PORT || 3000;
+
 server.listen(PORT, () => {
   console.log(`🚀 Server is running on port ${PORT}`);
 });
