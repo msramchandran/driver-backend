@@ -1791,11 +1791,31 @@ io.on('connection', (socket) => {
       const msgId = Date.now().toString(); // unique ID
       const message = { id: msgId, sender, text, timestamp: timestamp || new Date(), status: 'sent' };
       rides[rideId].chat.push(message);
-      
-      console.log(`[CHAT DEBUG] rideId=${rideId}, sender=${sender}, driverUid=${rides[rideId]?.driverUid}, customerId=${rides[rideId]?.customerId}`);
+
+      // 🛡️ If driverUid or customerId missing from memory (e.g. after server restart), load from DB
+      let memDriverUid   = rides[rideId].driverUid;
+      let memCustomerId  = rides[rideId].customerId;
+      let memCustomerName = rides[rideId].customerName;
+      let memDriverName   = rides[rideId].driverName;
+
+      if (!memDriverUid || !memCustomerId) {
+        try {
+          const rideDoc = await Ride.findOne({ rideId });
+          if (rideDoc) {
+            if (!memDriverUid)   { memDriverUid  = rideDoc.driverUid;  rides[rideId].driverUid  = rideDoc.driverUid; }
+            if (!memCustomerId)  { memCustomerId = rideDoc.customerId; rides[rideId].customerId = rideDoc.customerId; }
+            if (!memCustomerName){ memCustomerName = rideDoc.customerName; rides[rideId].customerName = rideDoc.customerName; }
+            if (!memDriverName)  { memDriverName  = rideDoc.driverName;  rides[rideId].driverName  = rideDoc.driverName; }
+            console.log(`[CHAT] Repopulated ride cache from DB: driverUid=${memDriverUid}, customerId=${memCustomerId}`);
+          }
+        } catch (err) {
+          console.error('[CHAT] Error fetching ride from DB:', err.message);
+        }
+      }
+
       // Emit to the other party (customer or driver app)
       if (sender === 'customer') {
-        const driverUid = rides[rideId].driverUid;
+        const driverUid = memDriverUid;
         let currentDriverSocketId = rides[rideId].driverSocketId;
         
         // Find latest socket ID in case the driver reconnected
@@ -1814,32 +1834,39 @@ io.on('connection', (socket) => {
         
         // 🚀 Send FCM Push Notification to Driver
         if (driverUid) {
-          const customerName = rides[rideId].customerName || 'Customer';
+          const customerName = memCustomerName || 'Customer';
           sendDriverFCM(
             driverUid,
             `Message from ${customerName}`,
             text,
             { type: 'chat', rideId: rideId, messageId: msgId }
           );
+        } else {
+          console.log(`[CHAT] ❌ driverUid still missing for ride ${rideId}, cannot send driver FCM.`);
         }
       } else {
-        io.emit('receiveMessage', { rideId, message }); // fallback simple broadcast for driver -> customer
+        // Driver → Customer
+        const customerId = memCustomerId;
         
-        // ? Send FCM Push Notification to Customer
-        const customerId = rides[rideId].customerId;
+        // Try to emit to customer via socket
+        io.emit('receiveMessage', { rideId, message });
+        
+        // 🚀 Send FCM Push Notification to Customer
         if (customerId) {
-          // Find driver name from active driver or use default
-          const driverName = activeDrivers[socket.id]?.name || rides[rideId].driverName || 'Driver';
+          const driverName = activeDrivers[socket.id]?.name || memDriverName || 'Driver';
           sendCustomerFCM(
             customerId,
             `Message from ${driverName}`,
             text,
             { type: 'chat', rideId: rideId, messageId: msgId }
           );
+        } else {
+          console.log(`[CHAT] ❌ customerId still missing for ride ${rideId}, cannot send customer FCM.`);
         }
       }
     }
   });
+
 
   socket.on('getChatHistory', (data) => {
     const { rideId } = data;
