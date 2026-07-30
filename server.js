@@ -87,6 +87,7 @@ const userSchema = new mongoose.Schema({
   idFrontUrl: String,
   idBackUrl: String,
   isRegistered: { type: Boolean, default: false },
+  fcmToken: { type: String, default: '' },
   status: { type: String, enum: ['pending', 'active', 'rejected', 'blocked'], default: 'pending' },
   forceUpdate: { type: Boolean, default: false },
   appVersion: { type: String, default: '1.0.0' },
@@ -1809,6 +1810,17 @@ io.on('connection', (socket) => {
         if (currentDriverSocketId) {
           io.to(currentDriverSocketId).emit('receiveMessage', { rideId, message });
         }
+        
+        // 🚀 Send FCM Push Notification to Driver
+        if (driverUid) {
+          const customerName = rides[rideId].customerName || 'Customer';
+          sendDriverFCM(
+            driverUid,
+            `Message from ${customerName}`,
+            text,
+            { type: 'chat', rideId: rideId, messageId: msgId }
+          );
+        }
       } else {
         io.emit('receiveMessage', { rideId, message }); // fallback simple broadcast for driver -> customer
         
@@ -2117,7 +2129,38 @@ async function sendCustomerFCM(customerId, title, body, data = {}) {
   }
 }
 
-// 🟢 Update FCM Token API
+// 🟢 Helper Function to Send FCM to Driver
+async function sendDriverFCM(driverUid, title, body, data = {}) {
+  try {
+    const driver = await User.findOne({ uid: driverUid });
+    if (driver && driver.fcmToken) {
+      const message = {
+        token: driver.fcmToken,
+        notification: {
+          title: title,
+          body: body
+        },
+        data: {
+          title: title,
+          body: body,
+          ...data,
+          click_action: "FLUTTER_NOTIFICATION_CLICK"
+        },
+        android: {
+          priority: "high"
+        }
+      };
+      await getMessaging().send(message);
+      console.log(`✅ FCM Sent to driver ${driverUid}: ${title}`);
+    } else {
+      console.log(`⚠️ No FCM token found for driver ${driverUid}`);
+    }
+  } catch (error) {
+    console.error(`❌ FCM Send Error to driver ${driverUid}:`, error);
+  }
+}
+
+// 🟢 Update FCM Token API (Customer)
 app.post('/customer/update-fcm-token', async (req, res) => {
   try {
     const { uid, fcmToken } = req.body;
@@ -2207,6 +2250,23 @@ app.put('/customer/:uid', async (req, res) => {
     res.status(200).json({ message: "Customer updated successfully!", customer });
   } catch (error) {
     console.error("❌ Customer Update Error:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 🟢 Update FCM Token API (Driver)
+app.post('/driver/update-fcm-token', async (req, res) => {
+  try {
+    const { uid, fcmToken } = req.body;
+    if (!uid || !fcmToken) return res.status(400).json({ error: "Missing uid or fcmToken" });
+
+    await User.findOneAndUpdate(
+      { uid },
+      { fcmToken },
+      { new: true }
+    );
+    res.status(200).json({ message: "Driver FCM Token updated successfully" });
+  } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
