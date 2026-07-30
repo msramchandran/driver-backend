@@ -10,6 +10,18 @@ const mongoose = require('mongoose');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const admin = require('firebase-admin');
+
+// Initialize Firebase Admin
+try {
+  const serviceAccount = require('./serviceAccountKey.json');
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount)
+  });
+  console.log("✅ Firebase Admin initialized successfully!");
+} catch (error) {
+  console.error("❌ Firebase Admin initialization failed:", error.message);
+}
 
 const app = express();
 const server = http.createServer(app);
@@ -1554,6 +1566,7 @@ io.on('connection', (socket) => {
 
         rides[rideId].status = 'accepted';
         io.emit('rideAccepted', confirmationData);
+        sendCustomerFCM(confirmationData.customerId, 'Ride Accepted', `Driver ${data.driverName} has accepted your ride`, { event: 'rideAccepted', rideId });
         socket.broadcast.emit('rideAcceptedByOther', { rideId });
         console.log(`✅ Ride ${rideId} → accepted by ${data.driverName} | pickup=(${confirmationData.lat},${confirmationData.lng}) drop=(${confirmationData.dropLat},${confirmationData.dropLng})`);
       } else {
@@ -1572,6 +1585,11 @@ io.on('connection', (socket) => {
     socket.broadcast.emit('rideStartedNotification', data);
 
     try {
+      const rideDoc = await Ride.findOne({ rideId });
+      if (rideDoc && rideDoc.customerId) {
+        sendCustomerFCM(rideDoc.customerId, 'Ride Started', 'Your ride has started.', { event: 'rideStarted', rideId });
+      }
+      
       await Ride.findOneAndUpdate(
         { rideId },
         { status: 'started', startedAt: new Date() }
@@ -1590,6 +1608,11 @@ io.on('connection', (socket) => {
     delete rides[rideId];
 
     try {
+      const rideDoc = await Ride.findOne({ rideId });
+      if (rideDoc && rideDoc.customerId) {
+        sendCustomerFCM(rideDoc.customerId, 'Ride Finished', 'Your ride has been completed.', { event: 'rideFinished', rideId });
+      }
+      
       const ride = await Ride.findOneAndUpdate(
         { rideId },
         { status: 'finished', finishedAt: new Date() },
@@ -1697,6 +1720,11 @@ io.on('connection', (socket) => {
     delete rides[rideId];
 
     try {
+      const rideDoc = await Ride.findOne({ rideId });
+      if (rideDoc && rideDoc.customerId) {
+        sendCustomerFCM(rideDoc.customerId, 'Ride Canceled', `Your ride was canceled: ${reason}`, { event: 'rideCanceled', rideId });
+      }
+      
       await Ride.findOneAndUpdate(
         { rideId },
         { 
@@ -1977,6 +2005,7 @@ const customerSchema = new mongoose.Schema({
   email: { type: String, default: '' },
   profileImageUrl: { type: String, default: '' },
   isRegistered: { type: Boolean, default: false },
+  fcmToken: { type: String, default: '' },
   createdAt: { type: Date, default: Date.now },
   referralCode: { type: String, unique: true, sparse: true },
   isReferralUsed: { type: Boolean, default: false },
@@ -2025,6 +2054,49 @@ const customerSchema = new mongoose.Schema({
 });
 
 const Customer = mongoose.model('Customer', customerSchema);
+
+// 🟢 Helper Function to Send FCM
+async function sendCustomerFCM(customerId, title, body, data = {}) {
+  try {
+    const customer = await Customer.findOne({ uid: customerId });
+    if (customer && customer.fcmToken) {
+      const message = {
+        token: customer.fcmToken,
+        data: {
+          title: title,
+          body: body,
+          ...data,
+          click_action: "FLUTTER_NOTIFICATION_CLICK"
+        }
+      };
+      // Send as a data-only message so Flutter can handle it in the background
+      await admin.messaging().send(message);
+      console.log(`✅ FCM Sent to customer ${customerId}: ${title}`);
+    } else {
+      console.log(`⚠️ No FCM token found for customer ${customerId}`);
+    }
+  } catch (error) {
+    console.error(`❌ FCM Send Error to ${customerId}:`, error);
+  }
+}
+
+// 🟢 Update FCM Token API
+app.post('/customer/update-fcm-token', async (req, res) => {
+  try {
+    const { uid, fcmToken } = req.body;
+    if (!uid || !fcmToken) return res.status(400).json({ error: "Missing uid or fcmToken" });
+
+    await Customer.findOneAndUpdate(
+      { uid },
+      { fcmToken },
+      { new: true, upsert: true }
+    );
+    res.status(200).json({ message: "FCM Token updated successfully" });
+  } catch (error) {
+    console.error("❌ FCM Token Update Error:", error);
+    res.status(500).json({ error: "Server Error" });
+  }
+});
 
 // 🟢 Customer Register / Update API
 // Flutter app இருந்து POST /customer/register என்று call செய்யும்
