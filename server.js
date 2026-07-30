@@ -1784,14 +1784,30 @@ io.on('connection', (socket) => {
   // =====================================================
   // CHAT EVENTS (In-memory for active rides)
   // =====================================================
-  socket.on('sendMessage', (data) => {
+  socket.on('sendMessage', async (data) => {
     const { rideId, sender, text, timestamp } = data;
     if (rides[rideId]) {
       if (!rides[rideId].chat) rides[rideId].chat = [];
-      const msgId = Date.now().toString(); // unique ID
+      const msgId = Date.now().toString();
       const message = { id: msgId, sender, text, timestamp: timestamp || new Date(), status: 'sent' };
       rides[rideId].chat.push(message);
-      
+
+      // 🛡️ DB Fallback: If driverUid or customerId missing in memory (e.g. after server restart), load from DB
+      if (!rides[rideId].driverUid || !rides[rideId].customerId) {
+        try {
+          const rideDoc = await Ride.findOne({ rideId });
+          if (rideDoc) {
+            if (!rides[rideId].driverUid)    rides[rideId].driverUid    = rideDoc.driverUid;
+            if (!rides[rideId].customerId)   rides[rideId].customerId   = rideDoc.customerId;
+            if (!rides[rideId].customerName) rides[rideId].customerName = rideDoc.customerName;
+            if (!rides[rideId].driverName)   rides[rideId].driverName   = rideDoc.driverName;
+            console.log(`[CHAT] Repopulated cache from DB: driverUid=${rides[rideId].driverUid}, customerId=${rides[rideId].customerId}`);
+          }
+        } catch (err) {
+          console.error('[CHAT] DB fallback error:', err.message);
+        }
+      }
+
       // Emit to the other party (customer or driver app)
       if (sender === 'customer') {
         const driverUid = rides[rideId].driverUid;
@@ -1822,12 +1838,12 @@ io.on('connection', (socket) => {
           );
         }
       } else {
-        io.emit('receiveMessage', { rideId, message }); // fallback simple broadcast for driver -> customer
+        // Driver → Customer: emit via socket
+        io.emit('receiveMessage', { rideId, message });
         
-        // ? Send FCM Push Notification to Customer
+        // 🚀 Send FCM Push Notification to Customer
         const customerId = rides[rideId].customerId;
         if (customerId) {
-          // Find driver name from active driver or use default
           const driverName = activeDrivers[socket.id]?.name || rides[rideId].driverName || 'Driver';
           sendCustomerFCM(
             customerId,
@@ -1839,6 +1855,7 @@ io.on('connection', (socket) => {
       }
     }
   });
+
 
   socket.on('getChatHistory', (data) => {
     const { rideId } = data;
