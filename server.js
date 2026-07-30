@@ -2062,14 +2062,21 @@ async function sendCustomerFCM(customerId, title, body, data = {}) {
     if (customer && customer.fcmToken) {
       const message = {
         token: customer.fcmToken,
+        notification: {
+          title: title,
+          body: body
+        },
         data: {
           title: title,
           body: body,
           ...data,
           click_action: "FLUTTER_NOTIFICATION_CLICK"
+        },
+        android: {
+          priority: "high"
         }
       };
-      // Send as a data-only message so Flutter can handle it in the background
+      // Send message. The 'notification' block ensures Android automatically displays it when locked/backgrounded.
       await admin.messaging().send(message);
       console.log(`✅ FCM Sent to customer ${customerId}: ${title}`);
     } else {
