@@ -1811,6 +1811,19 @@ io.on('connection', (socket) => {
         }
       } else {
         io.emit('receiveMessage', { rideId, message }); // fallback simple broadcast for driver -> customer
+        
+        // ? Send FCM Push Notification to Customer
+        const customerId = rides[rideId].customerId;
+        if (customerId) {
+          // Find driver name from active driver or use default
+          const driverName = activeDrivers[socket.id]?.name || rides[rideId].driverName || 'Driver';
+          sendCustomerFCM(
+            customerId,
+            `Message from ${driverName}`,
+            text,
+            { type: 'chat', rideId: rideId, messageId: msgId }
+          );
+        }
       }
     }
   });
