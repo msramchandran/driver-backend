@@ -11,6 +11,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const admin = require('firebase-admin');
+const { getMessaging } = require('firebase-admin/messaging');
 
 // Initialize Firebase Admin
 try {
@@ -2077,7 +2078,7 @@ async function sendCustomerFCM(customerId, title, body, data = {}) {
         }
       };
       // Send message. The 'notification' block ensures Android automatically displays it when locked/backgrounded.
-      await admin.messaging().send(message);
+      await getMessaging().send(message);
       console.log(`✅ FCM Sent to customer ${customerId}: ${title}`);
     } else {
       console.log(`⚠️ No FCM token found for customer ${customerId}`);
