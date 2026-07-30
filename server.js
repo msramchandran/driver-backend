@@ -1757,7 +1757,7 @@ io.on('connection', (socket) => {
       try {
         const existingRide = await Ride.findOne({ rideId });
         if (existingRide && existingRide.status !== 'requested') {
-           console.log(`⏳ Ride ${rideId} is already ${existingRide.status} in DB. Ignoring client timeout.`);
+           console.log(`⏳ Ride ${rideId} is already ${existingRide.status}. Ignoring client timeout.`);
            return;
         }
       } catch (err) {
@@ -1792,6 +1792,7 @@ io.on('connection', (socket) => {
       const message = { id: msgId, sender, text, timestamp: timestamp || new Date(), status: 'sent' };
       rides[rideId].chat.push(message);
       
+      console.log(`[CHAT DEBUG] rideId=${rideId}, sender=${sender}, driverUid=${rides[rideId]?.driverUid}, customerId=${rides[rideId]?.customerId}`);
       // Emit to the other party (customer or driver app)
       if (sender === 'customer') {
         const driverUid = rides[rideId].driverUid;
