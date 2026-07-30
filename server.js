@@ -12,12 +12,13 @@ const path = require('path');
 const fs = require('fs');
 const admin = require('firebase-admin');
 const { getMessaging } = require('firebase-admin/messaging');
+const { initializeApp, cert } = require('firebase-admin/app');
 
 // Initialize Firebase Admin
 try {
   const serviceAccount = require('./serviceAccountKey.json');
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount)
+  initializeApp({
+    credential: cert(serviceAccount)
   });
   console.log("✅ Firebase Admin initialized successfully!");
 } catch (error) {
