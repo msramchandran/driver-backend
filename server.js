@@ -1796,11 +1796,11 @@ io.on('connection', (socket) => {
         const driverUid = rides[rideId].driverUid;
         let currentDriverSocketId = rides[rideId].driverSocketId;
         
-        // Find latest socket ID in case the driver reconnected (works even if off-duty)
+        // Find latest socket ID in case the driver reconnected
         if (driverUid) {
-          for (const [sId, s] of io.sockets.sockets.entries()) {
-            if (s.driverUid === driverUid) {
-              currentDriverSocketId = sId;
+          for (const [socketId, driverData] of Object.entries(activeDrivers)) {
+            if (driverData.driverUid === driverUid) {
+              currentDriverSocketId = socketId;
               break;
             }
           }
