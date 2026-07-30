@@ -1745,8 +1745,23 @@ io.on('connection', (socket) => {
   socket.on('timeoutRide', async (data) => {
     const rideId = data.rideId;
     if (rides[rideId]) {
+      if (rides[rideId].status !== 'requested') {
+        console.log(`⏳ Ride ${rideId} is already ${rides[rideId].status}. Ignoring client timeout.`);
+        return;
+      }
       rides[rideId].status = 'timeout';
       delete rides[rideId];
+    } else {
+      // Check DB if not in memory (to prevent race conditions)
+      try {
+        const existingRide = await Ride.findOne({ rideId });
+        if (existingRide && existingRide.status !== 'requested') {
+           console.log(`⏳ Ride ${rideId} is already ${existingRide.status} in DB. Ignoring client timeout.`);
+           return;
+        }
+      } catch (err) {
+        console.error('❌ DB check timeoutRide error:', err.message);
+      }
     }
     io.emit('rideTimedOut', { rideId, status: 'timeout' });
     io.emit('rideCanceled', { rideId, status: 'timeout' }); // notify driver app
