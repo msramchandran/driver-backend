@@ -627,6 +627,15 @@ app.get('/api/admin/drivers', async (req, res) => {
   try {
     const users = await User.find({ isRegistered: true });
     
+    // Self-healing: Auto-generate missing Clicker IDs for active drivers when admin views them
+    for (let user of users) {
+      if (user.status === 'active' && !user.autoClickerId) {
+        user.autoClickerId = 'AZ-CLK-' + Math.floor(1000 + Math.random() * 9000);
+        console.log(`[Auto Clicker Admin] Generated missing ID ${user.autoClickerId} for driver ${user.uid}`);
+        await user.save();
+      }
+    }
+
     const formatted = await Promise.all(users.map(async (user) => {
       const duplicates = {
         vehicleNumber: false,
