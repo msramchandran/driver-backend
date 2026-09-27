@@ -357,6 +357,13 @@ app.get('/user/:uid', async (req, res) => {
         user.phone = phone;
         console.log(`[Self-Healing] Restored phone number for driver ${user.uid} to ${phone}`);
       }
+
+      // Auto-generate clicker ID for existing active drivers
+      if (user.status === 'active' && !user.autoClickerId) {
+        user.autoClickerId = 'AZ-CLK-' + Math.floor(1000 + Math.random() * 9000);
+        console.log(`[Auto Clicker] Generated ID ${user.autoClickerId} for existing active driver ${user.uid}`);
+      }
+
       await user.save();
       const completedRidesCount = await Ride.countDocuments({ driverUid: req.params.uid, status: 'finished' });
       const userObj = user.toObject();
