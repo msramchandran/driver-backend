@@ -65,36 +65,7 @@ const io = new Server(server, {
 const mongoURI = 'mongodb+srv://msramchandran2_db_user:LXruemGHHozPvaaF@ramachandrancluster.0jq4kie.mongodb.net/azhai_db?retryWrites=true&w=majority';
 
 mongoose.connect(mongoURI)
-  .then(async () => {
-    console.log("✅ Connected to MongoDB Atlas Successfully!");
-    
-    // ─── Startup Migration: Generate Clicker IDs for existing active drivers ───
-    try {
-      const activeDriversWithoutId = await User.find({ 
-        status: 'active', 
-        $or: [
-          { autoClickerId: { $exists: false } },
-          { autoClickerId: '' },
-          { autoClickerId: null }
-        ]
-      });
-      
-      if (activeDriversWithoutId.length > 0) {
-        console.log(`[Startup Migration] Found ${activeDriversWithoutId.length} active drivers without Clicker IDs. Generating...`);
-        for (const driver of activeDriversWithoutId) {
-          driver.autoClickerId = 'AZ-CLK-' + Math.floor(1000 + Math.random() * 9000);
-          await driver.save();
-          console.log(`[Startup Migration] ✅ Generated ${driver.autoClickerId} for driver ${driver.uid} (${driver.fullName})`);
-        }
-        console.log(`[Startup Migration] 🎉 Done! Generated IDs for ${activeDriversWithoutId.length} drivers.`);
-      } else {
-        console.log('[Startup Migration] ✅ All active drivers already have Clicker IDs.');
-      }
-    } catch (migErr) {
-      console.error('[Startup Migration] ❌ Error:', migErr.message);
-    }
-    // ─────────────────────────────────────────────────────────────────────────────
-  })
+  .then(() => console.log("✅ Connected to MongoDB Atlas Successfully!"))
   .catch(err => console.error("❌ MongoDB Connection Error:", err));
 
 const userSchema = new mongoose.Schema({
@@ -169,7 +140,44 @@ const userSchema = new mongoose.Schema({
 
 const User = mongoose.model('User', userSchema);
 
-// =====================================================
+// ─── Auto Clicker ID Migration (runs after User model is ready) ───────────────
+async function generateMissingClickerIds() {
+  try {
+    const driversWithoutId = await User.find({
+      status: 'active',
+      $or: [
+        { autoClickerId: { $exists: false } },
+        { autoClickerId: '' },
+        { autoClickerId: null }
+      ]
+    });
+    if (driversWithoutId.length === 0) {
+      console.log('[ClickerMigration] ✅ All active drivers already have Clicker IDs.');
+      return { updated: 0 };
+    }
+    console.log(`[ClickerMigration] Found ${driversWithoutId.length} drivers without IDs. Generating...`);
+    const results = [];
+    for (const driver of driversWithoutId) {
+      driver.autoClickerId = 'AZ-CLK-' + Math.floor(1000 + Math.random() * 9000);
+      await driver.save();
+      results.push({ uid: driver.uid, name: driver.fullName, id: driver.autoClickerId });
+      console.log(`[ClickerMigration] ✅ ${driver.fullName} → ${driver.autoClickerId}`);
+    }
+    console.log(`[ClickerMigration] 🎉 Done! ${driversWithoutId.length} IDs generated.`);
+    return { updated: driversWithoutId.length, drivers: results };
+  } catch (err) {
+    console.error('[ClickerMigration] ❌ Error:', err.message);
+    throw err;
+  }
+}
+
+// Run migration on startup (User model is now defined)
+setTimeout(() => {
+  generateMissingClickerIds().catch(console.error);
+}, 3000); // 3 second delay to ensure DB connection is fully established
+// ──────────────────────────────────────────────────────────────────────────────
+
+
 // 🆕 APK RELEASE SCHEMA — Persist upload version history
 // =====================================================
 const apkReleaseSchema = new mongoose.Schema({
@@ -280,6 +288,21 @@ const activePublicDrivers = {}; // 🆕 Memory store for dashboard public sharin
 
 app.get('/', (req, res) => {
   res.send('✅ Azhai Partner Backend is running!');
+});
+
+// ⚡ One-time Migration: Generate Clicker IDs for all active drivers
+// Call this URL once to fix all existing drivers: GET /api/admin/generate-clicker-ids
+app.get('/api/admin/generate-clicker-ids', async (req, res) => {
+  try {
+    const result = await generateMissingClickerIds();
+    res.status(200).json({
+      success: true,
+      message: `Migration complete! Generated ${result.updated} Clicker IDs.`,
+      drivers: result.drivers || []
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // 🔴 Updated Register API with Safety Checks and pending status reset
