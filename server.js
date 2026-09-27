@@ -65,7 +65,36 @@ const io = new Server(server, {
 const mongoURI = 'mongodb+srv://msramchandran2_db_user:LXruemGHHozPvaaF@ramachandrancluster.0jq4kie.mongodb.net/azhai_db?retryWrites=true&w=majority';
 
 mongoose.connect(mongoURI)
-  .then(() => console.log("✅ Connected to MongoDB Atlas Successfully!"))
+  .then(async () => {
+    console.log("✅ Connected to MongoDB Atlas Successfully!");
+    
+    // ─── Startup Migration: Generate Clicker IDs for existing active drivers ───
+    try {
+      const activeDriversWithoutId = await User.find({ 
+        status: 'active', 
+        $or: [
+          { autoClickerId: { $exists: false } },
+          { autoClickerId: '' },
+          { autoClickerId: null }
+        ]
+      });
+      
+      if (activeDriversWithoutId.length > 0) {
+        console.log(`[Startup Migration] Found ${activeDriversWithoutId.length} active drivers without Clicker IDs. Generating...`);
+        for (const driver of activeDriversWithoutId) {
+          driver.autoClickerId = 'AZ-CLK-' + Math.floor(1000 + Math.random() * 9000);
+          await driver.save();
+          console.log(`[Startup Migration] ✅ Generated ${driver.autoClickerId} for driver ${driver.uid} (${driver.fullName})`);
+        }
+        console.log(`[Startup Migration] 🎉 Done! Generated IDs for ${activeDriversWithoutId.length} drivers.`);
+      } else {
+        console.log('[Startup Migration] ✅ All active drivers already have Clicker IDs.');
+      }
+    } catch (migErr) {
+      console.error('[Startup Migration] ❌ Error:', migErr.message);
+    }
+    // ─────────────────────────────────────────────────────────────────────────────
+  })
   .catch(err => console.error("❌ MongoDB Connection Error:", err));
 
 const userSchema = new mongoose.Schema({
