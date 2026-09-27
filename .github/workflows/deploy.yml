@@ -3,7 +3,7 @@ name: Deploy to AWS EC2
 on:
   push:
     branches:
-      - main # உங்கள் மெயின் பிராஞ்ச் பெயர் 'master' ஆக இருந்தால், இங்கே 'master' என மாற்றிக்கொள்ளுங்கள்
+      - main
 
 jobs:
   deploy:
@@ -16,7 +16,11 @@ jobs:
           username: ${{ secrets.USERNAME }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-            cd /home/ubuntu/driver-backend  # IMPORTANT: உங்கள் AWS சர்வரில் ப்ராஜெக்ட் எங்கு உள்ளதோ அந்த Path-ஐ சரியாக கொடுக்கவும்
+            cd /home/ubuntu/driver-backend
             git pull origin main
-            npm install
-            pm2 restart all
+            npm install --production
+            pm2 stop all
+            pm2 start server.js --name "azhai-backend" || pm2 restart azhai-backend
+            pm2 save
+            echo "✅ Deploy complete. Server restarted."
+            pm2 list
