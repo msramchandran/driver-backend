@@ -132,6 +132,10 @@ const userSchema = new mongoose.Schema({
       completedAt: { type: Date, default: Date.now },
     }
   ],
+  // ⚡ Auto Clicker Tracking
+  autoClickerId: { type: String, default: '' },
+  autoClickerTrips: { type: Number, default: 0 },
+  isAutoClickerBlocked: { type: Boolean, default: false },
 });
 
 const User = mongoose.model('User', userSchema);
@@ -707,6 +711,9 @@ app.get('/api/admin/drivers', async (req, res) => {
         totalRatings,
         goodReasons,
         badReasons,
+        clickerId: user.autoClickerId || '',
+        clickerTrips: user.autoClickerTrips || 0,
+        isClickerBlocked: user.isAutoClickerBlocked || false,
       };
     }));
 
@@ -725,9 +732,19 @@ app.put('/api/admin/drivers/:driverId/status', async (req, res) => {
     if (!['active', 'rejected', 'pending', 'blocked'].includes(status)) {
       return res.status(400).json({ error: "Invalid status" });
     }
+    // Generate auto clicker ID if activating for the first time
+    let updateFields = { status };
+    if (status === 'active') {
+      const existingUser = await User.findOne({ uid: driverId });
+      if (existingUser && !existingUser.autoClickerId) {
+        // e.g. AZ-CLK-8472
+        updateFields.autoClickerId = 'AZ-CLK-' + Math.floor(1000 + Math.random() * 9000);
+      }
+    }
+
     const user = await User.findOneAndUpdate(
       { uid: driverId },
-      { status },
+      updateFields,
       { new: true }
     );
     if (user) {
@@ -2906,6 +2923,127 @@ app.put('/api/admin/tutorial-videos/:id/toggle', async (req, res) => {
     res.status(200).json({ message: `Video ${video.isActive ? 'activated' : 'deactivated'}`, video });
   } catch (error) {
     console.error('❌ Toggle Tutorial Video Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// =====================================================
+// ⚡ AUTO CLICKER APIs
+// =====================================================
+
+// 1. Auto Clicker Login API
+app.post('/api/clicker-login', async (req, res) => {
+  try {
+    const { driver_id } = req.body;
+    if (!driver_id) {
+      return res.status(400).json({ status: 'error', message: 'Driver Auto Clicker ID is required' });
+    }
+
+    const user = await User.findOne({ autoClickerId: driver_id });
+    if (!user) {
+      return res.status(404).json({ status: 'error', message: 'Invalid Auto Clicker ID' });
+    }
+
+    if (user.status !== 'active') {
+      return res.status(403).json({ status: 'error', message: 'Your driver profile is not active. Please contact Admin.' });
+    }
+
+    // Check block condition (e.g., reached 100 trips)
+    if (user.isAutoClickerBlocked || user.autoClickerTrips >= 100) {
+      // Auto-block them in DB if they just hit the limit
+      if (!user.isAutoClickerBlocked && user.autoClickerTrips >= 100) {
+        user.isAutoClickerBlocked = true;
+        await user.save();
+      }
+      return res.status(403).json({ 
+        status: 'blocked', 
+        accepted_trips: user.autoClickerTrips,
+        message: `You use ${user.autoClickerTrips} accepted trip again use the service to pay the admin`
+      });
+    }
+
+    res.status(200).json({ status: 'success', message: 'Login successful' });
+  } catch (error) {
+    console.error('❌ Auto Clicker Login Error:', error);
+    res.status(500).json({ status: 'error', message: error.message });
+  }
+});
+
+// 2. Auto Clicker Track Trip API
+app.post('/api/update-clicker-trip', async (req, res) => {
+  try {
+    const { driver_id } = req.body;
+    if (!driver_id) {
+      return res.status(400).json({ status: 'error', message: 'Driver Auto Clicker ID is required' });
+    }
+
+    const user = await User.findOne({ autoClickerId: driver_id });
+    if (!user) {
+      return res.status(404).json({ status: 'error', message: 'Invalid Auto Clicker ID' });
+    }
+
+    user.autoClickerTrips = (user.autoClickerTrips || 0) + 1;
+    
+    // Auto block if they reach 100 trips
+    let blockedNow = false;
+    if (user.autoClickerTrips >= 100 && !user.isAutoClickerBlocked) {
+      user.isAutoClickerBlocked = true;
+      blockedNow = true;
+    }
+    
+    await user.save();
+
+    res.status(200).json({ 
+      status: 'success', 
+      accepted_trips: user.autoClickerTrips,
+      is_blocked: user.isAutoClickerBlocked,
+      message: blockedNow ? 'Limit reached. Blocked.' : 'Trip count updated'
+    });
+  } catch (error) {
+    console.error('❌ Auto Clicker Trip Update Error:', error);
+    res.status(500).json({ status: 'error', message: error.message });
+  }
+});
+
+// 3. Admin API: Get all Auto Clicker Users
+app.get('/api/admin/clicker-users', async (req, res) => {
+  try {
+    const users = await User.find({ autoClickerId: { $ne: '' }, autoClickerId: { $exists: true } });
+    
+    const formatted = users.map(user => ({
+      id: user.uid,
+      name: user.fullName || 'Unknown',
+      phone: user.phone || 'N/A',
+      clickerId: user.autoClickerId,
+      acceptedTrips: user.autoClickerTrips || 0,
+      isBlocked: user.isAutoClickerBlocked || false
+    }));
+
+    res.status(200).json(formatted);
+  } catch (error) {
+    console.error('❌ Get Clicker Users Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 4. Admin API: Toggle Auto Clicker Block Status manually
+app.post('/api/admin/clicker-users/:driverId/toggle-block', async (req, res) => {
+  try {
+    const { driverId } = req.params;
+    const user = await User.findOne({ uid: driverId });
+    if (!user) return res.status(404).json({ error: 'Driver not found' });
+
+    user.isAutoClickerBlocked = !user.isAutoClickerBlocked;
+    
+    // If unblocking after reaching the limit, reset their trips to 0 so they can use it again
+    if (!user.isAutoClickerBlocked && user.autoClickerTrips >= 100) {
+      user.autoClickerTrips = 0;
+    }
+    
+    await user.save();
+    res.status(200).json({ message: 'Auto Clicker block status toggled', isBlocked: user.isAutoClickerBlocked });
+  } catch (error) {
+    console.error('❌ Toggle Clicker Block Error:', error);
     res.status(500).json({ error: error.message });
   }
 });
