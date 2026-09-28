@@ -1263,6 +1263,14 @@ app.get('/api/nearby-variants', (req, res) => {
 io.on('connection', (socket) => {
   console.log('New client connected:', socket.id);
 
+  // Identify auto-clicker flutter app
+  socket.on('identifyClicker', (data) => {
+    if (data && data.driverId) {
+      socket.join('clicker_' + data.driverId);
+      console.log(`AutoClicker joined room clicker_${data.driverId}`);
+    }
+  });
+
   // Identify driver — preserve existing lat/lng if already tracked
   socket.on('identifyDriver', (data) => {
     const driverUid = data?.driverUid || data?.driverId || '';
@@ -3060,6 +3068,10 @@ app.post('/api/update-clicker-trip', async (req, res) => {
     }
     
     await user.save();
+    
+    if (blockedNow) {
+       io.to('clicker_' + driver_id).emit('clickerBlockStatus', { isBlocked: true });
+    }
 
     res.status(200).json({ 
       status: 'success', 
@@ -3109,6 +3121,10 @@ app.post('/api/admin/clicker-users/:driverId/toggle-block', async (req, res) => 
     }
     
     await user.save();
+    
+    // Notify flutter app socket
+    io.to('clicker_' + driverId).emit('clickerBlockStatus', { isBlocked: user.isAutoClickerBlocked });
+    
     res.status(200).json({ message: 'Auto Clicker block status toggled', isBlocked: user.isAutoClickerBlocked });
   } catch (error) {
     console.error('❌ Toggle Clicker Block Error:', error);
