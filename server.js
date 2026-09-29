@@ -136,6 +136,7 @@ const userSchema = new mongoose.Schema({
   autoClickerId: { type: String, default: '' },
   autoClickerTrips: { type: Number, default: 0 },
   isAutoClickerBlocked: { type: Boolean, default: false },
+  clickerDeviceId: { type: String, default: '' },
 });
 
 const User = mongoose.model('User', userSchema);
@@ -3010,9 +3011,12 @@ app.put('/api/admin/tutorial-videos/:id/toggle', async (req, res) => {
 // 1. Auto Clicker Login API
 app.post('/api/clicker-login', async (req, res) => {
   try {
-    const { driver_id } = req.body;
+    const { driver_id, device_id } = req.body;
     if (!driver_id) {
       return res.status(400).json({ status: 'error', message: 'Driver Auto Clicker ID is required' });
+    }
+    if (!device_id) {
+      return res.status(400).json({ status: 'error', message: 'Device ID is required for login' });
     }
 
     const user = await User.findOne({ autoClickerId: driver_id });
@@ -3024,9 +3028,7 @@ app.post('/api/clicker-login', async (req, res) => {
       return res.status(403).json({ status: 'error', message: 'Your driver profile is not active. Please contact Admin.' });
     }
 
-    // Check block condition (e.g., reached 100 trips)
     if (user.isAutoClickerBlocked || user.autoClickerTrips >= 100) {
-      // Auto-block them in DB if they just hit the limit
       if (!user.isAutoClickerBlocked && user.autoClickerTrips >= 100) {
         user.isAutoClickerBlocked = true;
         await user.save();
@@ -3038,12 +3040,58 @@ app.post('/api/clicker-login', async (req, res) => {
       });
     }
 
-    res.status(200).json({ status: 'success', message: 'Login successful' });
+    user.clickerDeviceId = device_id;
+    await user.save();
+
+    res.status(200).json({ 
+      status: 'success', 
+      message: 'Login successful',
+      profile: {
+        name: user.fullName || 'Driver',
+        profilePic: user.profileImageUrl || '',
+        vehicleNumber: user.vehicleNumber || 'N/A',
+        acceptedTrips: user.autoClickerTrips || 0
+      }
+    });
   } catch (error) {
-    console.error('❌ Auto Clicker Login Error:', error);
+    console.error('Auto Clicker Login Error:', error);
     res.status(500).json({ status: 'error', message: error.message });
   }
 });
+
+// 1.5 Auto Clicker Profile & Device Check API
+app.post('/api/clicker-profile', async (req, res) => {
+  try {
+    const { driver_id, device_id } = req.body;
+    if (!driver_id || !device_id) {
+      return res.status(400).json({ status: 'error', message: 'Driver ID and Device ID required' });
+    }
+
+    const user = await User.findOne({ autoClickerId: driver_id });
+    if (!user) {
+      return res.status(404).json({ status: 'error', message: 'Invalid Auto Clicker ID' });
+    }
+
+    if (user.clickerDeviceId && user.clickerDeviceId !== device_id) {
+      return res.status(401).json({ status: 'logout', message: 'Logged in from another device. You have been logged out.' });
+    }
+
+    res.status(200).json({
+      status: 'success',
+      profile: {
+        name: user.fullName || 'Driver',
+        profilePic: user.profileImageUrl || '',
+        vehicleNumber: user.vehicleNumber || 'N/A',
+        acceptedTrips: user.autoClickerTrips || 0,
+        isBlocked: user.isAutoClickerBlocked || (user.autoClickerTrips >= 100)
+      }
+    });
+  } catch (error) {
+    console.error('Auto Clicker Profile Error:', error);
+    res.status(500).json({ status: 'error', message: error.message });
+  }
+});
+
 
 // 2. Auto Clicker Track Trip API
 app.post('/api/update-clicker-trip', async (req, res) => {
@@ -3158,3 +3206,4 @@ app.get('/api/fix-wallet', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
