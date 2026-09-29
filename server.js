@@ -3040,6 +3040,10 @@ app.post('/api/clicker-login', async (req, res) => {
       });
     }
 
+    if (user.clickerDeviceId && user.clickerDeviceId !== device_id) {
+      io.to('clicker_' + driver_id).emit('forceLogout', { message: 'Logged in from another device. You have been logged out.' });
+    }
+
     user.clickerDeviceId = device_id;
     await user.save();
 
@@ -3206,4 +3210,5 @@ app.get('/api/fix-wallet', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
 
