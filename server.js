@@ -3142,14 +3142,19 @@ app.get('/api/admin/clicker-users', async (req, res) => {
   try {
     const users = await User.find({ autoClickerId: { $ne: '' }, autoClickerId: { $exists: true } });
     
-    const formatted = users.map(user => ({
-      id: user.uid,
-      name: user.fullName || 'Unknown',
-      phone: user.phone || 'N/A',
-      clickerId: user.autoClickerId,
-      acceptedTrips: user.autoClickerTrips || 0,
-      isBlocked: user.isAutoClickerBlocked || false
-    }));
+    const formatted = users.map(user => {
+      const roomName = 'clicker_' + user.autoClickerId;
+      const isOnline = io.sockets.adapter.rooms.has(roomName) && io.sockets.adapter.rooms.get(roomName).size > 0;
+      return {
+        id: user.uid,
+        name: user.fullName || 'Unknown',
+        phone: user.phone || 'N/A',
+        clickerId: user.autoClickerId,
+        acceptedTrips: user.autoClickerTrips || 0,
+        isBlocked: user.isAutoClickerBlocked || false,
+        isOnline: isOnline
+      };
+    });
 
     res.status(200).json(formatted);
   } catch (error) {
