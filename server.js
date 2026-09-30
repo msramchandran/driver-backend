@@ -3206,6 +3206,49 @@ server.listen(PORT, () => {
   console.log(`🚀 Server is running on port ${PORT}`);
 });
 
+
+
+// --- AUTO CLICKER ADMIN APIS ---
+app.post('/api/admin/clicker-users/:driverId/update-trips', async (req, res) => {
+  try {
+    const user = await User.findOne({ uid: req.params.driverId });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    user.autoClickerTrips = req.body.trips;
+    await user.save();
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/clicker-users/:driverId/toggle-payment', async (req, res) => {
+  try {
+    const user = await User.findOne({ uid: req.params.driverId });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    user.hasPaidForClicker = !user.hasPaidForClicker;
+    await user.save();
+    io.to('clicker_' + user.autoClickerId).emit('clickerPaymentStatus', {
+      status: user.hasPaidForClicker ? 'paid' : 'unpaid'
+    });
+    res.json({ success: true, hasPaidForClicker: user.hasPaidForClicker });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/clicker-payment/upload', upload.single('screenshot'), async (req, res) => {
+  try {
+    const { driver_id } = req.body;
+    const user = await User.findOne({ autoClickerId: driver_id });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    user.clickerPaymentScreenshot = req.file.path;
+    await user.save();
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/fix-wallet', async (req, res) => {
   try {
     const drivers = await User.find({ promoTripsPoints: { $gt: 0 } });

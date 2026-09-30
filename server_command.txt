@@ -1,0 +1,18 @@
+python -c "
+import json
+import re
+log_file = r'C:\Users\Chidambaramurugan\.gemini\antigravity\brain\0846eeca-ccfa-4c6d-aa75-2e802186f6b3\.system_generated\logs\transcript_full.jsonl'
+with open(log_file, 'r', encoding='utf-8') as f:
+    for line in f:
+        if 'update-trips' in line and 'toggle-payment' in line and 'CommandLine' in line:
+            try:
+                data = json.loads(line)
+                if 'tool_calls' in data:
+                    for t in data['tool_calls']:
+                        if 'CommandLine' in t.get('args', {}) and 'update-trips' in t['args']['CommandLine']:
+                            with open('server_command.txt', 'w', encoding='utf-8') as out:
+                                out.write(t['args']['CommandLine'])
+                            print('Found the script!')
+            except:
+                pass
+"
