@@ -136,6 +136,10 @@ const userSchema = new mongoose.Schema({
   autoClickerId: { type: String, default: '' },
   autoClickerTrips: { type: Number, default: 0 },
   isAutoClickerBlocked: { type: Boolean, default: false },
+    hasPaidForClicker: { type: Boolean, default: false },
+    clickerPaymentScreenshot: { type: String, default: '' },
+    hasPaidForClicker: { type: Boolean, default: false },
+    clickerPaymentScreenshot: { type: String, default: '' },
   clickerDeviceId: { type: String, default: '' },
 });
 
@@ -3087,6 +3091,7 @@ app.post('/api/clicker-profile', async (req, res) => {
         profilePic: user.profileImageUrl || '',
         vehicleNumber: user.vehicleNumber || 'N/A',
         acceptedTrips: user.autoClickerTrips || 0,
+          hasPaidForClicker: user.hasPaidForClicker || false,
         isBlocked: user.isAutoClickerBlocked || (user.autoClickerTrips >= 100)
       }
     });
@@ -3151,7 +3156,10 @@ app.get('/api/admin/clicker-users', async (req, res) => {
         phone: user.phone || 'N/A',
         clickerId: user.autoClickerId,
         acceptedTrips: user.autoClickerTrips || 0,
+          hasPaidForClicker: user.hasPaidForClicker || false,
         isBlocked: user.isAutoClickerBlocked || false,
+          hasPaidForClicker: user.hasPaidForClicker || false,
+          clickerPaymentScreenshot: user.clickerPaymentScreenshot || '',
         isOnline: isOnline
       };
     });
@@ -3215,5 +3223,11 @@ app.get('/api/fix-wallet', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
+
+
+
+
+
 
 
