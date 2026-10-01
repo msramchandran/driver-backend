@@ -3215,6 +3215,12 @@ app.post('/api/admin/clicker-users/:driverId/toggle-payment', async (req, res) =
     const user = await User.findOne({ uid: req.params.driverId });
     if (!user) return res.status(404).json({ error: 'User not found' });
     user.hasPaidForClicker = !user.hasPaidForClicker;
+    
+    // Reset trip count to 0 when marked as paid
+    if (user.hasPaidForClicker) {
+      user.autoClickerTrips = 0;
+    }
+    
     await user.save();
     io.to('clicker_' + user.autoClickerId).emit('clickerPaymentStatus', {
       status: user.hasPaidForClicker ? 'paid' : 'unpaid'
