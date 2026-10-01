@@ -3032,15 +3032,10 @@ app.post('/api/clicker-login', async (req, res) => {
       return res.status(403).json({ status: 'error', message: 'Your driver profile is not active. Please contact Admin.' });
     }
 
-    if (user.isAutoClickerBlocked || user.autoClickerTrips >= 20) {
-      if (!user.isAutoClickerBlocked && user.autoClickerTrips >= 20) {
-        user.isAutoClickerBlocked = true;
-        await user.save();
-      }
+    if (user.isAutoClickerBlocked && user.autoClickerTrips < 20) {
       return res.status(403).json({ 
         status: 'blocked', 
-        accepted_trips: user.autoClickerTrips,
-        message: `You use ${user.autoClickerTrips} accepted trip again use the service to pay the admin`
+        message: 'Your access has been blocked by Admin. Please contact support.' 
       });
     }
 
@@ -3117,24 +3112,18 @@ app.post('/api/update-clicker-trip', async (req, res) => {
 
     user.autoClickerTrips = (user.autoClickerTrips || 0) + 1;
     
-    // Auto block if they reach 20 trips
-    let blockedNow = false;
-    if (user.autoClickerTrips >= 20 && !user.isAutoClickerBlocked) {
-      user.isAutoClickerBlocked = true;
-      blockedNow = true;
+    let reachedLimit = false;
+    if (user.autoClickerTrips >= 20) {
+      reachedLimit = true;
     }
     
     await user.save();
-    
-    if (blockedNow) {
-       io.to('clicker_' + driver_id).emit('clickerBlockStatus', { isBlocked: true });
-    }
 
     res.status(200).json({ 
       status: 'success', 
       accepted_trips: user.autoClickerTrips,
-      is_blocked: user.isAutoClickerBlocked,
-      message: blockedNow ? 'Limit reached. Blocked.' : 'Trip count updated'
+      is_blocked: reachedLimit,
+      message: reachedLimit ? 'Limit reached. Paywall enforced.' : 'Trip count updated'
     });
   } catch (error) {
     console.error('❌ Auto Clicker Trip Update Error:', error);
