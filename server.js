@@ -3032,8 +3032,8 @@ app.post('/api/clicker-login', async (req, res) => {
       return res.status(403).json({ status: 'error', message: 'Your driver profile is not active. Please contact Admin.' });
     }
 
-    if (user.isAutoClickerBlocked || user.autoClickerTrips >= 100) {
-      if (!user.isAutoClickerBlocked && user.autoClickerTrips >= 100) {
+    if (user.isAutoClickerBlocked || user.autoClickerTrips >= 20) {
+      if (!user.isAutoClickerBlocked && user.autoClickerTrips >= 20) {
         user.isAutoClickerBlocked = true;
         await user.save();
       }
@@ -3092,7 +3092,7 @@ app.post('/api/clicker-profile', async (req, res) => {
         vehicleNumber: user.vehicleNumber || 'N/A',
         acceptedTrips: user.autoClickerTrips || 0,
           hasPaidForClicker: user.hasPaidForClicker || false,
-        isBlocked: user.isAutoClickerBlocked || (user.autoClickerTrips >= 100)
+        isBlocked: user.isAutoClickerBlocked || (user.autoClickerTrips >= 20)
       }
     });
   } catch (error) {
@@ -3117,9 +3117,9 @@ app.post('/api/update-clicker-trip', async (req, res) => {
 
     user.autoClickerTrips = (user.autoClickerTrips || 0) + 1;
     
-    // Auto block if they reach 100 trips
+    // Auto block if they reach 20 trips
     let blockedNow = false;
-    if (user.autoClickerTrips >= 100 && !user.isAutoClickerBlocked) {
+    if (user.autoClickerTrips >= 20 && !user.isAutoClickerBlocked) {
       user.isAutoClickerBlocked = true;
       blockedNow = true;
     }
@@ -3181,7 +3181,7 @@ app.post('/api/admin/clicker-users/:driverId/toggle-block', async (req, res) => 
     user.isAutoClickerBlocked = !user.isAutoClickerBlocked;
     
     // If unblocking after reaching the limit, reset their trips to 0 so they can use it again
-    if (!user.isAutoClickerBlocked && user.autoClickerTrips >= 100) {
+    if (!user.isAutoClickerBlocked && user.autoClickerTrips >= 20) {
       user.autoClickerTrips = 0;
     }
     
@@ -3266,6 +3266,7 @@ app.get('/api/fix-wallet', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
 
 
 
