@@ -295,6 +295,58 @@ app.get('/', (req, res) => {
   res.send('✅ Azhai Partner Backend is running!');
 });
 
+// ====================================================================
+// 🔒 CHECK USER EXISTS API — Prevents Firebase SMS for new users
+// POST /api/auth/check-user
+// Body: { "phone": "9876543210" }
+// Returns: { "exists": true/false }
+// ====================================================================
+app.post('/api/auth/check-user', async (req, res) => {
+  try {
+    const { phone } = req.body;
+
+    if (!phone) {
+      return res.status(400).json({ success: false, error: 'Phone number is required' });
+    }
+
+    // Normalize: strip all non-digits, take last 10 digits
+    const cleanPhone = phone.replace(/\D/g, '');
+    const last10 = cleanPhone.slice(-10);
+
+    if (last10.length < 10) {
+      return res.status(400).json({ success: false, error: 'Invalid phone number format' });
+    }
+
+    // Search MongoDB for this phone number in multiple formats
+    const user = await User.findOne({
+      isDeleted: { $ne: true }, // Exclude soft-deleted accounts
+      $or: [
+        { phone: last10 },
+        { phone: `+91${last10}` },
+        { phone: `91${last10}` },
+        { phone: new RegExp(last10 + '$') }, // ends with last10
+      ]
+    });
+
+    if (user) {
+      console.log(`[CheckUser] ✅ Phone ${last10} FOUND → UID: ${user.uid}`);
+      return res.status(200).json({
+        exists: true,
+        status: user.status || 'pending',
+        isRegistered: user.isRegistered || false
+      });
+    } else {
+      console.log(`[CheckUser] ❌ Phone ${last10} NOT FOUND in DB`);
+      return res.status(200).json({ exists: false });
+    }
+
+  } catch (error) {
+    console.error('❌ CheckUser API Error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+// ====================================================================
+
 // ⚡ One-time Migration: Generate Clicker IDs for all active drivers
 // Call this URL once to fix all existing drivers: GET /api/admin/generate-clicker-ids
 app.get('/api/admin/generate-clicker-ids', async (req, res) => {
