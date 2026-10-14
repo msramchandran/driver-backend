@@ -71,6 +71,7 @@ mongoose.connect(mongoURI)
 const userSchema = new mongoose.Schema({
   uid: { type: String, required: true, unique: true },
   phone: { type: String, default: '' },
+  email: { type: String, default: '' },
   fullName: String,
   dob: String,
   gender: String,
@@ -342,6 +343,35 @@ app.post('/api/auth/check-user', async (req, res) => {
 
   } catch (error) {
     console.error('❌ CheckUser API Error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ====================================================================
+// 🔵 SYNC GOOGLE ACCOUNT API
+// POST /api/user/sync-google-account
+// Body: { "uid": "...", "email": "driver@gmail.com", "displayName": "..." }
+// ====================================================================
+app.post('/api/user/sync-google-account', async (req, res) => {
+  try {
+    const { uid, email, displayName } = req.body;
+    if (!uid) {
+      return res.status(400).json({ success: false, error: 'UID is required' });
+    }
+
+    const updateFields = {};
+    if (email) updateFields.email = email;
+
+    const user = await User.findOneAndUpdate(
+      { uid },
+      { $set: updateFields },
+      { new: true, upsert: true }
+    );
+
+    console.log(`[SyncGoogle] ✅ Synced Google email "${email}" for UID ${uid}`);
+    return res.status(200).json({ success: true, email: user.email });
+  } catch (error) {
+    console.error('❌ Sync Google Account Error:', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -817,6 +847,8 @@ app.get('/api/admin/drivers', async (req, res) => {
         id: user.uid,
         name: user.fullName || 'Unknown Driver',
         phone: user.phone || 'N/A',
+        email: user.email || '',
+        authProvider: user.email ? 'Google' : 'Phone',
         autoVariant: user.selectedVehicle || 'Auto',
         regNumber: user.vehicleNumber || 'N/A',
         status: user.status || 'pending',
