@@ -715,6 +715,8 @@ app.get('/api/admin/customers', async (req, res) => {
         id: c.uid,
         name: c.fullName || 'Unknown Customer',
         phone: c.phone || 'N/A',
+        email: c.email || '',
+        authProvider: c.email ? 'Google' : 'Phone',
         profileImage: c.profileImageUrl || 'https://via.placeholder.com/150',
         referralCode: c.referralCode || 'N/A',
         isDeleted: c.isDeleted || false,
@@ -2382,7 +2384,7 @@ app.post('/customer/update-fcm-token', async (req, res) => {
 app.post('/customer/register', async (req, res) => {
   console.log("📥 Customer registration data received...");
   try {
-    const { uid, fullName, phone, email } = req.body;
+    const { uid, fullName, phone, email, profileImageUrl } = req.body;
 
     if (!uid) {
       return res.status(400).json({ error: "uid is required" });
@@ -2393,16 +2395,26 @@ app.post('/customer/register', async (req, res) => {
 
     if (!referralCode) {
       const namePart = (fullName || 'CUS').substring(0, 3).toUpperCase();
-      const phonePart = (phone || '000').slice(-3);
+      const phoneDigits = (phone ? phone.replace(/\D/g, '') : '') || (email ? email.replace(/\D/g, '') : '');
+      const phonePart = phoneDigits ? phoneDigits.slice(-3) : `${Math.floor(100 + Math.random() * 900)}`;
       referralCode = `${namePart}${phonePart}${Math.floor(10 + Math.random() * 90)}`;
     }
 
+    const updateFields = {
+      uid,
+      fullName: fullName || existingCustomer?.fullName || 'Customer',
+      isRegistered: true,
+      isDeleted: false,
+      referralCode: referralCode
+    };
+
+    if (email) updateFields.email = email;
+    if (phone) updateFields.phone = phone;
+    if (profileImageUrl) updateFields.profileImageUrl = profileImageUrl;
+
     const customer = await Customer.findOneAndUpdate(
       { uid: uid },
-      { 
-        uid, fullName, phone, email, isRegistered: true, isDeleted: false,
-        referralCode: referralCode // ALWAYS SET IT SO OLD USERS GET IT TOO
-      },
+      { $set: updateFields },
       { upsert: true, new: true }
     );
 
