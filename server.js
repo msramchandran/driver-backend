@@ -137,11 +137,15 @@ const userSchema = new mongoose.Schema({
   autoClickerId: { type: String, default: '' },
   autoClickerTrips: { type: Number, default: 0 },
   isAutoClickerBlocked: { type: Boolean, default: false },
-    hasPaidForClicker: { type: Boolean, default: false },
-    clickerPaymentScreenshot: { type: String, default: '' },
-    hasPaidForClicker: { type: Boolean, default: false },
-    clickerPaymentScreenshot: { type: String, default: '' },
+  hasPaidForClicker: { type: Boolean, default: false },
+  clickerPaymentScreenshot: { type: String, default: '' },
   clickerDeviceId: { type: String, default: '' },
+  clickerAppVersion: { type: String, default: '1.0.0' },
+  clickerDailyTripCount: { type: Number, default: 0 },
+  clickerDailyEarnings: { type: Number, default: 0 },
+  clickerDailyLimitDate: { type: String, default: '' },
+  clickerDailyLimitEndTime: { type: Number, default: 0 },
+  isClickerDailyLimitActive: { type: Boolean, default: false },
 });
 
 const User = mongoose.model('User', userSchema);
@@ -3111,7 +3115,7 @@ app.put('/api/admin/tutorial-videos/:id/toggle', async (req, res) => {
 // 1. Auto Clicker Login API
 app.post('/api/clicker-login', async (req, res) => {
   try {
-    const { driver_id, device_id } = req.body;
+    const { driver_id, device_id, app_version } = req.body;
     if (!driver_id) {
       return res.status(400).json({ status: 'error', message: 'Driver Auto Clicker ID is required' });
     }
@@ -3128,7 +3132,7 @@ app.post('/api/clicker-login', async (req, res) => {
       return res.status(403).json({ status: 'error', message: 'Your driver profile is not active. Please contact Admin.' });
     }
 
-    if (user.isAutoClickerBlocked && user.autoClickerTrips < 20) {
+    if (user.isAutoClickerBlocked) {
       return res.status(403).json({ 
         status: 'blocked', 
         message: 'Your access has been blocked by Admin. Please contact support.' 
@@ -3140,6 +3144,9 @@ app.post('/api/clicker-login', async (req, res) => {
     }
 
     user.clickerDeviceId = device_id;
+    if (app_version) {
+      user.clickerAppVersion = app_version;
+    }
     await user.save();
 
     res.status(200).json({ 
@@ -3149,7 +3156,13 @@ app.post('/api/clicker-login', async (req, res) => {
         name: user.fullName || 'Driver',
         profilePic: user.profileImageUrl || '',
         vehicleNumber: user.vehicleNumber || 'N/A',
-        acceptedTrips: user.autoClickerTrips || 0
+        acceptedTrips: user.autoClickerTrips || 0,
+        hasPaidForClicker: user.hasPaidForClicker || false,
+        appVersion: user.clickerAppVersion || '1.0.0',
+        isDailyLimitActive: user.isClickerDailyLimitActive && (Date.now() < (user.clickerDailyLimitEndTime || 0)),
+        dailyLimitEndTime: user.clickerDailyLimitEndTime || 0,
+        dailyTripCount: user.clickerDailyTripCount || 0,
+        dailyEarnings: user.clickerDailyEarnings || 0
       }
     });
   } catch (error) {
@@ -3161,7 +3174,7 @@ app.post('/api/clicker-login', async (req, res) => {
 // 1.5 Auto Clicker Profile & Device Check API
 app.post('/api/clicker-profile', async (req, res) => {
   try {
-    const { driver_id, device_id } = req.body;
+    const { driver_id, device_id, app_version } = req.body;
     if (!driver_id || !device_id) {
       return res.status(400).json({ status: 'error', message: 'Driver ID and Device ID required' });
     }
@@ -3175,6 +3188,20 @@ app.post('/api/clicker-profile', async (req, res) => {
       return res.status(401).json({ status: 'logout', message: 'Logged in from another device. You have been logged out.' });
     }
 
+    if (app_version && user.clickerAppVersion !== app_version) {
+      user.clickerAppVersion = app_version;
+    }
+
+    // Reset daily limit if 12hr block expired
+    if (user.isClickerDailyLimitActive && user.clickerDailyLimitEndTime && Date.now() >= user.clickerDailyLimitEndTime) {
+      user.isClickerDailyLimitActive = false;
+      user.clickerDailyLimitEndTime = 0;
+    }
+
+    await user.save();
+
+    const isDailyLimitActive = user.isClickerDailyLimitActive && (Date.now() < (user.clickerDailyLimitEndTime || 0));
+
     res.status(200).json({
       status: 'success',
       profile: {
@@ -3182,8 +3209,13 @@ app.post('/api/clicker-profile', async (req, res) => {
         profilePic: user.profileImageUrl || '',
         vehicleNumber: user.vehicleNumber || 'N/A',
         acceptedTrips: user.autoClickerTrips || 0,
-          hasPaidForClicker: user.hasPaidForClicker || false,
-        isBlocked: user.isAutoClickerBlocked || (user.autoClickerTrips >= 20)
+        hasPaidForClicker: user.hasPaidForClicker || false,
+        isBlocked: user.isAutoClickerBlocked || false,
+        appVersion: user.clickerAppVersion || '1.0.0',
+        isDailyLimitActive: isDailyLimitActive,
+        dailyLimitEndTime: user.clickerDailyLimitEndTime || 0,
+        dailyTripCount: user.clickerDailyTripCount || 0,
+        dailyEarnings: user.clickerDailyEarnings || 0
       }
     });
   } catch (error) {
@@ -3193,10 +3225,10 @@ app.post('/api/clicker-profile', async (req, res) => {
 });
 
 
-// 2. Auto Clicker Track Trip API
+// 2. Auto Clicker Track Trip API (With Daily Limit: 6 trips OR 1000 earnings)
 app.post('/api/update-clicker-trip', async (req, res) => {
   try {
-    const { driver_id } = req.body;
+    const { driver_id, fare, app_version } = req.body;
     if (!driver_id) {
       return res.status(400).json({ status: 'error', message: 'Driver Auto Clicker ID is required' });
     }
@@ -3206,20 +3238,67 @@ app.post('/api/update-clicker-trip', async (req, res) => {
       return res.status(404).json({ status: 'error', message: 'Invalid Auto Clicker ID' });
     }
 
-    user.autoClickerTrips = (user.autoClickerTrips || 0) + 1;
-    
-    let reachedLimit = false;
-    if (user.autoClickerTrips >= 20) {
-      reachedLimit = true;
+    if (app_version && user.clickerAppVersion !== app_version) {
+      user.clickerAppVersion = app_version;
     }
-    
+
+    const todayStr = new Date().toISOString().split('T')[0];
+
+    // Reset daily counts on new calendar day
+    if (user.clickerDailyLimitDate !== todayStr) {
+      user.clickerDailyTripCount = 0;
+      user.clickerDailyEarnings = 0;
+      user.clickerDailyLimitDate = todayStr;
+      user.isClickerDailyLimitActive = false;
+      user.clickerDailyLimitEndTime = 0;
+    }
+
+    // Check if 12hr block expired
+    if (user.isClickerDailyLimitActive && user.clickerDailyLimitEndTime && Date.now() >= user.clickerDailyLimitEndTime) {
+      user.isClickerDailyLimitActive = false;
+      user.clickerDailyLimitEndTime = 0;
+    }
+
+    // Increment overall accepted trips
+    user.autoClickerTrips = (user.autoClickerTrips || 0) + 1;
+    // Increment daily accepted trips
+    user.clickerDailyTripCount = (user.clickerDailyTripCount || 0) + 1;
+
+    // Add fare to daily earnings
+    const fareNum = parseFloat(fare) || 0;
+    user.clickerDailyEarnings = (user.clickerDailyEarnings || 0) + fareNum;
+
+    // Daily limit check: 6 trips OR 1000 rupees (whichever comes first)
+    const DAILY_TRIP_LIMIT = 6;
+    const DAILY_EARNING_LIMIT = 1000;
+    const BLOCK_DURATION_MS = 12 * 60 * 60 * 1000; // 12 hours
+
+    let dailyLimitJustReached = false;
+    if (!user.isClickerDailyLimitActive && (user.clickerDailyTripCount >= DAILY_TRIP_LIMIT || user.clickerDailyEarnings >= DAILY_EARNING_LIMIT)) {
+      user.isClickerDailyLimitActive = true;
+      user.clickerDailyLimitEndTime = Date.now() + BLOCK_DURATION_MS;
+      dailyLimitJustReached = true;
+
+      // Realtime socket emit to this user's room
+      io.to('clicker_' + user.autoClickerId).emit('dailyLimitReached', {
+        endTime: user.clickerDailyLimitEndTime,
+        dailyTrips: user.clickerDailyTripCount,
+        dailyEarnings: user.clickerDailyEarnings,
+        reason: user.clickerDailyTripCount >= DAILY_TRIP_LIMIT ? 'trips' : 'earnings'
+      });
+    }
+
     await user.save();
 
     res.status(200).json({ 
       status: 'success', 
       accepted_trips: user.autoClickerTrips,
-      is_blocked: reachedLimit,
-      message: reachedLimit ? 'Limit reached. Paywall enforced.' : 'Trip count updated'
+      is_blocked: false, // 20-trip auto block removed completely!
+      daily_limit_active: user.isClickerDailyLimitActive,
+      daily_limit_end_time: user.clickerDailyLimitEndTime || 0,
+      daily_trip_count: user.clickerDailyTripCount || 0,
+      daily_earnings: user.clickerDailyEarnings || 0,
+      message: dailyLimitJustReached ? 'Daily limit reached! 12 hour cooldown active.' : 'Trip count updated'
     });
   } catch (error) {
     console.error('❌ Auto Clicker Trip Update Error:', error);
@@ -3227,7 +3306,7 @@ app.post('/api/update-clicker-trip', async (req, res) => {
   }
 });
 
-// 3. Admin API: Get all Auto Clicker Users
+// 3. Admin API: Get all Auto Clicker Users (Includes App Version & Daily Limits)
 app.get('/api/admin/clicker-users', async (req, res) => {
   try {
     const users = await User.find({ autoClickerId: { $ne: '' }, autoClickerId: { $exists: true } });
@@ -3235,17 +3314,22 @@ app.get('/api/admin/clicker-users', async (req, res) => {
     const formatted = users.map(user => {
       const roomName = 'clicker_' + user.autoClickerId;
       const isOnline = io.sockets.adapter.rooms.has(roomName) && io.sockets.adapter.rooms.get(roomName).size > 0;
+      const isDailyLimitActive = user.isClickerDailyLimitActive && (Date.now() < (user.clickerDailyLimitEndTime || 0));
       return {
         id: user.uid,
         name: user.fullName || 'Unknown',
         phone: user.phone || 'N/A',
         clickerId: user.autoClickerId,
         acceptedTrips: user.autoClickerTrips || 0,
-          hasPaidForClicker: user.hasPaidForClicker || false,
+        hasPaidForClicker: user.hasPaidForClicker || false,
+        clickerPaymentScreenshot: user.clickerPaymentScreenshot || '',
         isBlocked: user.isAutoClickerBlocked || false,
-          hasPaidForClicker: user.hasPaidForClicker || false,
-          clickerPaymentScreenshot: user.clickerPaymentScreenshot || '',
-        isOnline: isOnline
+        isOnline: isOnline,
+        appVersion: user.clickerAppVersion || '1.0.0',
+        dailyTrips: user.clickerDailyTripCount || 0,
+        dailyEarnings: user.clickerDailyEarnings || 0,
+        isDailyLimitActive: isDailyLimitActive,
+        dailyLimitEndTime: user.clickerDailyLimitEndTime || 0
       };
     });
 
@@ -3260,24 +3344,76 @@ app.get('/api/admin/clicker-users', async (req, res) => {
 app.post('/api/admin/clicker-users/:driverId/toggle-block', async (req, res) => {
   try {
     const { driverId } = req.params;
-    const user = await User.findOne({ uid: driverId });
+    const user = await User.findOne({ $or: [{ uid: driverId }, { autoClickerId: driverId }] });
     if (!user) return res.status(404).json({ error: 'Driver not found' });
 
     user.isAutoClickerBlocked = !user.isAutoClickerBlocked;
-    
-    // If unblocking after reaching the limit, reset their trips to 0 so they can use it again
-    if (!user.isAutoClickerBlocked && user.autoClickerTrips >= 20) {
-      user.autoClickerTrips = 0;
-    }
-    
     await user.save();
     
     // Notify flutter app socket
-    io.to('clicker_' + driverId).emit('clickerBlockStatus', { isBlocked: user.isAutoClickerBlocked });
+    io.to('clicker_' + user.autoClickerId).emit('clickerBlockStatus', { isBlocked: user.isAutoClickerBlocked });
     
     res.status(200).json({ message: 'Auto Clicker block status toggled', isBlocked: user.isAutoClickerBlocked });
   } catch (error) {
     console.error('❌ Toggle Clicker Block Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 5. Admin API: Trigger Free Trial End Button
+app.post('/api/admin/clicker-users/:driverId/trigger-free-trial-end', async (req, res) => {
+  try {
+    const { driverId } = req.params;
+    const user = await User.findOne({ $or: [{ uid: driverId }, { autoClickerId: driverId }] });
+    if (!user) return res.status(404).json({ error: 'Driver not found' });
+
+    user.hasPaidForClicker = false;
+    await user.save();
+
+    // Emit event directly to driver app room
+    io.to('clicker_' + user.autoClickerId).emit('clickerFreeTrialEnd', {
+      message: 'Your free trial has ended. Please pay to continue using AutoClicker.'
+    });
+
+    console.log(`[FreeTrialEnd] Triggered for ${user.autoClickerId} (${user.fullName})`);
+    res.status(200).json({ success: true, message: `Free trial end triggered for ${user.autoClickerId}` });
+  } catch (error) {
+    console.error('❌ Trigger Free Trial End Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 6. Public API: Check Latest Auto Clicker APK Version
+app.get('/api/clicker-version', async (req, res) => {
+  try {
+    const latest = await ApkRelease.findOne().sort({ uploadedAt: -1 });
+    const versionName = latest ? latest.versionName : '1.0.0';
+    const fileName = latest ? latest.fileName : 'app-release.apk';
+    res.status(200).json({
+      latestVersion: versionName,
+      apkUrl: `http://43.205.135.3:3000/uploads/${fileName}`,
+      updateMessage: 'A new version of AutoClicker is available! Please update to continue.'
+    });
+  } catch (error) {
+    res.status(500).json({ latestVersion: '1.0.0', apkUrl: '', error: error.message });
+  }
+});
+
+// 7. Admin API: Force Update All Connected Clickers
+app.post('/api/admin/force-update-all-clickers', async (req, res) => {
+  try {
+    const latest = await ApkRelease.findOne().sort({ uploadedAt: -1 });
+    const versionName = latest ? latest.versionName : '1.0.0';
+    const fileName = latest ? latest.fileName : 'app-release.apk';
+
+    io.emit('forceAppUpdate', {
+      version: versionName,
+      apkUrl: `http://43.205.135.3:3000/uploads/${fileName}`,
+      message: 'Critical app update required! Please update immediately.'
+    });
+
+    res.status(200).json({ success: true, message: 'Force update broadcasted to all clicker users' });
+  } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
