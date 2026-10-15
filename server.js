@@ -3243,13 +3243,14 @@ app.post('/api/clicker-profile', async (req, res) => {
       return res.status(401).json({ status: 'logout', message: 'Logged in from another device. You have been logged out.' });
     }
 
-    // Strict version check - Auto-logout old APKs or outdated versions!
+    // Strict version check - Auto-logout ONLY old APKs that send no app_version!
+    // (Newer versions like 1.0.3+ have built-in Home Screen Update Dialog boxes and should not be logged out)
     const config = await getClickerConfig();
     const requiredVersion = config.latestVersion || '1.0.3';
-    if (!app_version || isVersionOlder(app_version, requiredVersion)) {
+    if (!app_version) {
       return res.status(200).json({
         status: 'logout',
-        message: `Your AutoClicker app is outdated (${app_version ? 'v' + app_version : 'Old version'}). Please download the latest update (v${requiredVersion}) from the website to continue.`
+        message: `Your AutoClicker app is outdated (Old version). Please download the latest update (v${requiredVersion}) from the website to continue.`
       });
     }
 
