@@ -1381,10 +1381,20 @@ io.on('connection', (socket) => {
   console.log('New client connected:', socket.id);
 
   // Identify auto-clicker flutter app
-  socket.on('identifyClicker', (data) => {
+  socket.on('identifyClicker', async (data) => {
     if (data && data.driverId) {
       socket.join('clicker_' + data.driverId);
-      console.log(`AutoClicker joined room clicker_${data.driverId}`);
+      console.log(`AutoClicker joined room clicker_${data.driverId} (version: ${data.appVersion || 'not specified'})`);
+      if (data.appVersion) {
+        try {
+          await User.updateOne(
+            { autoClickerId: data.driverId },
+            { $set: { clickerAppVersion: data.appVersion } }
+          );
+        } catch (e) {
+          console.error('Error updating clickerAppVersion on socket identify:', e.message);
+        }
+      }
     }
   });
 
