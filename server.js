@@ -221,6 +221,19 @@ async function getClickerConfig() {
   return config;
 }
 
+function isVersionOlder(current, target) {
+  if (!current) return true; // Missing version is always treated as old APK!
+  const c = current.toString().split('.').map(n => parseInt(n, 10) || 0);
+  const t = target.toString().split('.').map(n => parseInt(n, 10) || 0);
+  for (let i = 0; i < 3; i++) {
+    const cv = c[i] || 0;
+    const tv = t[i] || 0;
+    if (cv < tv) return true;
+    if (cv > tv) return false;
+  }
+  return false;
+}
+
 // =====================================================
 // 🚖 RIDE SCHEMA — Persist every ride lifecycle
 // =====================================================
@@ -3171,6 +3184,16 @@ app.post('/api/clicker-login', async (req, res) => {
       });
     }
 
+    // Strict version check - Reject old APKs that don't pass required app_version
+    const config = await getClickerConfig();
+    const requiredVersion = config.latestVersion || '1.0.3';
+    if (!app_version || isVersionOlder(app_version, requiredVersion)) {
+      return res.status(403).json({
+        status: 'error',
+        message: `Your AutoClicker app is outdated (${app_version ? 'v' + app_version : 'Old version'}). Please download the latest update (v${requiredVersion}) from the website to login.`
+      });
+    }
+
     if (user.clickerDeviceId && user.clickerDeviceId !== device_id) {
       io.to('clicker_' + driver_id).emit('forceLogout', { message: 'Logged in from another device. You have been logged out.' });
     }
@@ -3218,6 +3241,16 @@ app.post('/api/clicker-profile', async (req, res) => {
 
     if (user.clickerDeviceId && user.clickerDeviceId !== device_id) {
       return res.status(401).json({ status: 'logout', message: 'Logged in from another device. You have been logged out.' });
+    }
+
+    // Strict version check - Auto-logout old APKs or outdated versions!
+    const config = await getClickerConfig();
+    const requiredVersion = config.latestVersion || '1.0.3';
+    if (!app_version || isVersionOlder(app_version, requiredVersion)) {
+      return res.status(200).json({
+        status: 'logout',
+        message: `Your AutoClicker app is outdated (${app_version ? 'v' + app_version : 'Old version'}). Please download the latest update (v${requiredVersion}) from the website to continue.`
+      });
     }
 
     if (app_version && user.clickerAppVersion !== app_version) {
@@ -3268,6 +3301,16 @@ app.post('/api/update-clicker-trip', async (req, res) => {
     const user = await User.findOne({ autoClickerId: driver_id });
     if (!user) {
       return res.status(404).json({ status: 'error', message: 'Invalid Auto Clicker ID' });
+    }
+
+    // Strict version check - Reject trip accept requests from old APKs!
+    const config = await getClickerConfig();
+    const requiredVersion = config.latestVersion || '1.0.3';
+    if (!app_version || isVersionOlder(app_version, requiredVersion)) {
+      return res.status(403).json({
+        status: 'error',
+        message: `Outdated AutoClicker app (${app_version ? 'v' + app_version : 'Old version'}). Trip rejected. Please install the latest update (v${requiredVersion}).`
+      });
     }
 
     if (app_version && user.clickerAppVersion !== app_version) {
