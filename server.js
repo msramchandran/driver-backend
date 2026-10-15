@@ -199,6 +199,28 @@ const apkReleaseSchema = new mongoose.Schema({
 
 const ApkRelease = mongoose.model('ApkRelease', apkReleaseSchema);
 
+// 🆕 AUTO CLICKER CONFIG SCHEMA — Holds target version and Vercel download URL
+const clickerConfigSchema = new mongoose.Schema({
+  key: { type: String, default: 'clicker_config', unique: true },
+  latestVersion: { type: String, default: '1.0.0' },
+  apkUrl: { type: String, default: 'https://playstore-website-one.vercel.app/autoclicker.apk' },
+  updatedAt: { type: Date, default: Date.now },
+});
+
+const ClickerConfig = mongoose.model('ClickerConfig', clickerConfigSchema);
+
+async function getClickerConfig() {
+  let config = await ClickerConfig.findOne({ key: 'clicker_config' });
+  if (!config) {
+    config = await ClickerConfig.create({
+      key: 'clicker_config',
+      latestVersion: '1.0.0',
+      apkUrl: 'https://playstore-website-one.vercel.app/autoclicker.apk',
+    });
+  }
+  return config;
+}
+
 // =====================================================
 // 🚖 RIDE SCHEMA — Persist every ride lifecycle
 // =====================================================
@@ -3383,32 +3405,66 @@ app.post('/api/admin/clicker-users/:driverId/trigger-free-trial-end', async (req
   }
 });
 
-// 6. Public API: Check Latest Auto Clicker APK Version
+// 6. Public API: Check Latest Auto Clicker APK Version & Direct Download Link
 app.get('/api/clicker-version', async (req, res) => {
   try {
-    const latest = await ApkRelease.findOne().sort({ uploadedAt: -1 });
-    const versionName = latest ? latest.versionName : '1.0.0';
-    const fileName = latest ? latest.fileName : 'app-release.apk';
+    const config = await getClickerConfig();
     res.status(200).json({
-      latestVersion: versionName,
-      apkUrl: `http://43.205.135.3:3000/uploads/${fileName}`,
+      latestVersion: config.latestVersion || '1.0.0',
+      apkUrl: config.apkUrl || 'https://playstore-website-one.vercel.app/autoclicker.apk',
       updateMessage: 'A new version of AutoClicker is available! Please update to continue.'
     });
   } catch (error) {
-    res.status(500).json({ latestVersion: '1.0.0', apkUrl: '', error: error.message });
+    res.status(500).json({ 
+      latestVersion: '1.0.0', 
+      apkUrl: 'https://playstore-website-one.vercel.app/autoclicker.apk', 
+      error: error.message 
+    });
+  }
+});
+
+// 6.5 Admin API: Set/Update Target Version for Auto Clicker
+app.post('/api/admin/clicker-version', async (req, res) => {
+  try {
+    const { versionName, apkUrl } = req.body;
+    if (!versionName) {
+      return res.status(400).json({ error: 'versionName is required' });
+    }
+    const config = await getClickerConfig();
+    config.latestVersion = versionName.trim();
+    if (apkUrl && apkUrl.trim()) {
+      config.apkUrl = apkUrl.trim();
+    }
+    config.updatedAt = new Date();
+    await config.save();
+
+    // Broadcast real-time force update to all active clicker users!
+    io.emit('forceAppUpdate', {
+      version: config.latestVersion,
+      apkUrl: config.apkUrl,
+      message: `New update v${config.latestVersion} available! Please update now.`
+    });
+
+    console.log(`[ClickerVersion] Target version set to ${config.latestVersion} with URL ${config.apkUrl}`);
+    res.status(200).json({ 
+      success: true, 
+      latestVersion: config.latestVersion, 
+      apkUrl: config.apkUrl,
+      message: `Target version updated to v${config.latestVersion}`
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
 // 7. Admin API: Force Update All Connected Clickers
 app.post('/api/admin/force-update-all-clickers', async (req, res) => {
   try {
-    const latest = await ApkRelease.findOne().sort({ uploadedAt: -1 });
-    const versionName = latest ? latest.versionName : '1.0.0';
-    const fileName = latest ? latest.fileName : 'app-release.apk';
+    const config = await getClickerConfig();
 
     io.emit('forceAppUpdate', {
-      version: versionName,
-      apkUrl: `http://43.205.135.3:3000/uploads/${fileName}`,
+      version: config.latestVersion,
+      apkUrl: config.apkUrl,
       message: 'Critical app update required! Please update immediately.'
     });
 
