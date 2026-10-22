@@ -3251,10 +3251,11 @@ app.post('/api/clicker-profile', async (req, res) => {
     // Strict version check - Auto-logout old APKs!
     const config = await getClickerConfig();
     const requiredVersion = config.latestVersion || '1.0.3';
-    if (!app_version || isVersionOlder(app_version, requiredVersion)) {
+    const effectiveVersion = app_version || user.clickerAppVersion || '1.0.0';
+    if (isVersionOlder(effectiveVersion, requiredVersion)) {
       return res.status(200).json({
         status: 'logout',
-        message: `Your AutoClicker app is outdated (${app_version ? 'v' + app_version : 'Old version'}). Please download the latest update (v${requiredVersion}) from the website to continue.`
+        message: `Your AutoClicker app is outdated (v${effectiveVersion}). Please download the latest update (v${requiredVersion}) from the website to continue.`
       });
     }
 
