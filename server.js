@@ -146,6 +146,9 @@ const userSchema = new mongoose.Schema({
   clickerDailyLimitDate: { type: String, default: '' },
   clickerDailyLimitEndTime: { type: Number, default: 0 },
   isClickerDailyLimitActive: { type: Boolean, default: false },
+  // 🎬 Rewarded AD Tracking
+  lastAdWatchedAt: { type: Date, default: null },
+  adWatchCount: { type: Number, default: 0 },
 });
 
 const User = mongoose.model('User', userSchema);
@@ -3552,6 +3555,43 @@ app.post('/api/admin/clicker-users/:driverId/update-trips', async (req, res) => 
   }
 });
 
+// ====================================================================
+// ⚡ ADMIN — Remove 12-Hour Daily Limit Block Manually
+// POST /api/admin/clicker-users/:driverId/remove-daily-limit
+// ====================================================================
+app.post('/api/admin/clicker-users/:driverId/remove-daily-limit', async (req, res) => {
+  try {
+    const user = await User.findOne({
+      $or: [{ uid: req.params.driverId }, { autoClickerId: req.params.driverId }]
+    });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    user.isClickerDailyLimitActive = false;
+    user.clickerDailyLimitEndTime = 0;
+    await user.save();
+
+    console.log(`[Admin] 12-hour block removed for driver ${user.fullName} (${user.autoClickerId})`);
+
+    // Emit realtime socket unlock event to user's AutoClicker app
+    if (user.autoClickerId) {
+      io.to('clicker_' + user.autoClickerId).emit('dailyLimitRemoved', {
+        status: 'unblocked',
+        driverId: user.autoClickerId,
+        message: 'Your 12-hour block has been removed by Admin. You can now use AutoClicker.'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: '12-hour block removed successfully',
+      isDailyLimitActive: false
+    });
+  } catch (err) {
+    console.error('Error removing daily limit:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/admin/clicker-users/:driverId/toggle-payment', async (req, res) => {
   try {
     const user = await User.findOne({ uid: req.params.driverId });
@@ -3603,6 +3643,145 @@ app.get('/api/fix-wallet', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
+// ====================================================================
+// 🎬 AD STATUS CHECK — AutoClicker checks if user needs to watch AD
+// GET /api/ad/status?driverId=AZ-CLK-1234
+// ====================================================================
+app.get('/api/ad/status', async (req, res) => {
+  try {
+    const { driverId } = req.query;
+    if (!driverId) return res.status(400).json({ error: 'driverId is required' });
+
+    const user = await User.findOne({
+      $or: [{ autoClickerId: driverId }, { uid: driverId }]
+    });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
+    const now = Date.now();
+    let canUse = false;
+    let needsAd = true;
+    let hoursRemaining = 0;
+
+    if (user.lastAdWatchedAt) {
+      const elapsed = now - new Date(user.lastAdWatchedAt).getTime();
+      if (elapsed < SIX_HOURS_MS) {
+        canUse = true;
+        needsAd = false;
+        hoursRemaining = parseFloat(((SIX_HOURS_MS - elapsed) / (60 * 60 * 1000)).toFixed(1));
+      } else {
+        canUse = false;
+        needsAd = true;
+        hoursRemaining = 0;
+      }
+    }
+
+    console.log(`[AD Status] driverId=${driverId}, needsAd=${needsAd}, canUse=${canUse}, hoursRemaining=${hoursRemaining}`);
+    res.status(200).json({
+      needsAd,
+      canUse,
+      hoursRemaining,
+      lastAdWatchedAt: user.lastAdWatchedAt
+    });
+  } catch (err) {
+    console.error('[AD Status] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ====================================================================
+// 🎬 AD WATCH COMPLETE — Azhai Partner calls this after full AD watch
+// POST /api/ad/watch-complete
+// Body: { "driverId": "AZ-CLK-1234" }
+// ====================================================================
+app.post('/api/ad/watch-complete', async (req, res) => {
+  try {
+    const { driverId } = req.body;
+    if (!driverId) return res.status(400).json({ error: 'driverId is required' });
+
+    const user = await User.findOneAndUpdate(
+      { $or: [{ autoClickerId: driverId }, { uid: driverId }] },
+      {
+        $set: { lastAdWatchedAt: new Date() },
+        $inc: { adWatchCount: 1 }
+      },
+      { new: true }
+    );
+
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const nextAdTime = new Date(new Date().getTime() + 6 * 60 * 60 * 1000);
+    console.log(`[AD Watch Complete] ✅ driverId=${driverId}, totalWatched=${user.adWatchCount}`);
+    
+    // Also notify connected socket if active
+    if (user.autoClickerId) {
+      io.to('clicker_' + user.autoClickerId).emit('adWatchCompleted', {
+        driverId: user.autoClickerId,
+        nextAdTime: nextAdTime.toISOString()
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      adWatchCount: user.adWatchCount,
+      nextAdTime: nextAdTime.toISOString()
+    });
+  } catch (err) {
+    console.error('[AD Watch Complete] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ====================================================================
+// 🎬 ADMIN — AD Watch Log for all drivers
+// GET /api/admin/ad-watch-log
+// ====================================================================
+app.get('/api/admin/ad-watch-log', async (req, res) => {
+  try {
+    const users = await User.find({
+      isRegistered: true,
+      status: 'active',
+      autoClickerId: { $exists: true, $ne: '' }
+    }).select('uid fullName phone autoClickerId lastAdWatchedAt adWatchCount');
+
+    const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
+    const now = Date.now();
+
+    const formatted = users.map(u => {
+      let canUse = false;
+      let hoursRemaining = 0;
+      let minutesAgo = null;
+
+      if (u.lastAdWatchedAt) {
+        const elapsed = now - new Date(u.lastAdWatchedAt).getTime();
+        canUse = elapsed < SIX_HOURS_MS;
+        if (canUse) {
+          hoursRemaining = parseFloat(((SIX_HOURS_MS - elapsed) / (60 * 60 * 1000)).toFixed(1));
+        }
+        minutesAgo = Math.floor(elapsed / 60000);
+      }
+
+      return {
+        id: u.uid,
+        name: u.fullName || 'Unknown',
+        phone: u.phone || 'N/A',
+        clickerId: u.autoClickerId || 'N/A',
+        lastAdWatchedAt: u.lastAdWatchedAt || null,
+        minutesAgo,
+        adWatchCount: u.adWatchCount || 0,
+        canUse,
+        hoursRemaining
+      };
+    });
+
+    res.status(200).json(formatted);
+  } catch (err) {
+    console.error('[Admin AD Log] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 
 
 
