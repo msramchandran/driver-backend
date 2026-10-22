@@ -3237,7 +3237,9 @@ app.post('/api/clicker-profile', async (req, res) => {
       return res.status(400).json({ status: 'error', message: 'Driver ID and Device ID required' });
     }
 
-    const user = await User.findOne({ autoClickerId: driver_id });
+    const user = await User.findOne({
+      $or: [{ autoClickerId: driver_id }, { uid: driver_id }]
+    });
     if (!user) {
       return res.status(404).json({ status: 'error', message: 'Invalid Auto Clicker ID' });
     }
@@ -3246,14 +3248,13 @@ app.post('/api/clicker-profile', async (req, res) => {
       return res.status(401).json({ status: 'logout', message: 'Logged in from another device. You have been logged out.' });
     }
 
-    // Strict version check - Auto-logout ONLY old APKs that send no app_version!
-    // (Newer versions like 1.0.3+ have built-in Home Screen Update Dialog boxes and should not be logged out)
+    // Strict version check - Auto-logout old APKs!
     const config = await getClickerConfig();
     const requiredVersion = config.latestVersion || '1.0.3';
-    if (!app_version) {
+    if (!app_version || isVersionOlder(app_version, requiredVersion)) {
       return res.status(200).json({
         status: 'logout',
-        message: `Your AutoClicker app is outdated (Old version). Please download the latest update (v${requiredVersion}) from the website to continue.`
+        message: `Your AutoClicker app is outdated (${app_version ? 'v' + app_version : 'Old version'}). Please download the latest update (v${requiredVersion}) from the website to continue.`
       });
     }
 
@@ -3261,30 +3262,58 @@ app.post('/api/clicker-profile', async (req, res) => {
       user.clickerAppVersion = app_version;
     }
 
+    const now = Date.now();
+
     // Reset daily limit if 12hr block expired
-    if (user.isClickerDailyLimitActive && user.clickerDailyLimitEndTime && Date.now() >= user.clickerDailyLimitEndTime) {
+    if (user.isClickerDailyLimitActive && user.clickerDailyLimitEndTime && now >= user.clickerDailyLimitEndTime) {
       user.isClickerDailyLimitActive = false;
       user.clickerDailyLimitEndTime = 0;
     }
 
     await user.save();
 
-    const isDailyLimitActive = user.isClickerDailyLimitActive && (Date.now() < (user.clickerDailyLimitEndTime || 0));
+    // 12-Hour Daily Limit Block Calculations
+    const isDailyLimitActive = user.isClickerDailyLimitActive && (now < (user.clickerDailyLimitEndTime || 0));
+    let dailyLimitRemainingMinutes = 0;
+    if (isDailyLimitActive && user.clickerDailyLimitEndTime) {
+      dailyLimitRemainingMinutes = Math.max(0, Math.ceil((user.clickerDailyLimitEndTime - now) / 60000));
+    }
+
+    // 6-Hour AD Pass Calculations
+    const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
+    let isAdPassActive = false;
+    let adPassHoursRemaining = 0;
+    if (user.lastAdWatchedAt) {
+      const elapsed = now - new Date(user.lastAdWatchedAt).getTime();
+      if (elapsed < SIX_HOURS_MS) {
+        isAdPassActive = true;
+        adPassHoursRemaining = parseFloat(((SIX_HOURS_MS - elapsed) / (60 * 60 * 1000)).toFixed(1));
+      }
+    }
 
     res.status(200).json({
       status: 'success',
       profile: {
         name: user.fullName || 'Driver',
+        phone: user.phone || 'N/A',
+        clickerId: user.autoClickerId || driver_id,
         profilePic: user.profileImageUrl || '',
         vehicleNumber: user.vehicleNumber || 'N/A',
         acceptedTrips: user.autoClickerTrips || 0,
         hasPaidForClicker: user.hasPaidForClicker || false,
         isBlocked: user.isAutoClickerBlocked || false,
-        appVersion: user.clickerAppVersion || '1.0.0',
+        appVersion: user.clickerAppVersion || app_version || '1.0.3',
+        // 12-Hour Block Info
         isDailyLimitActive: isDailyLimitActive,
         dailyLimitEndTime: user.clickerDailyLimitEndTime || 0,
+        dailyLimitRemainingMinutes: dailyLimitRemainingMinutes,
         dailyTripCount: user.clickerDailyTripCount || 0,
-        dailyEarnings: user.clickerDailyEarnings || 0
+        dailyEarnings: user.clickerDailyEarnings || 0,
+        // 6-Hour AD Pass Info
+        isAdPassActive: isAdPassActive,
+        adPassHoursRemaining: adPassHoursRemaining,
+        lastAdWatchedAt: user.lastAdWatchedAt || null,
+        adWatchCount: user.adWatchCount || 0
       }
     });
   } catch (error) {
