@@ -146,6 +146,7 @@ const userSchema = new mongoose.Schema({
   clickerDailyLimitDate: { type: String, default: '' },
   clickerDailyLimitEndTime: { type: Number, default: 0 },
   isClickerDailyLimitActive: { type: Boolean, default: false },
+  clickerDailyLimitExemptDate: { type: String, default: '' },
   // 🎬 Rewarded AD Tracking
   lastAdWatchedAt: { type: Date, default: null },
   adWatchCount: { type: Number, default: 0 },
@@ -3217,8 +3218,8 @@ app.post('/api/clicker-login', async (req, res) => {
         acceptedTrips: user.autoClickerTrips || 0,
         hasPaidForClicker: user.hasPaidForClicker || false,
         appVersion: user.clickerAppVersion || '1.0.0',
-        isDailyLimitActive: user.isClickerDailyLimitActive && (Date.now() < (user.clickerDailyLimitEndTime || 0)),
-        dailyLimitEndTime: user.clickerDailyLimitEndTime || 0,
+        isDailyLimitActive: (user.clickerDailyLimitExemptDate !== new Date().toISOString().split('T')[0]) && user.isClickerDailyLimitActive && (Date.now() < (user.clickerDailyLimitEndTime || 0)),
+        dailyLimitEndTime: (user.clickerDailyLimitExemptDate === new Date().toISOString().split('T')[0]) ? 0 : (user.clickerDailyLimitEndTime || 0),
         dailyTripCount: user.clickerDailyTripCount || 0,
         dailyEarnings: user.clickerDailyEarnings || 0
       }
@@ -3274,7 +3275,9 @@ app.post('/api/clicker-profile', async (req, res) => {
     await user.save();
 
     // 12-Hour Daily Limit Block Calculations
-    const isDailyLimitActive = user.isClickerDailyLimitActive && (now < (user.clickerDailyLimitEndTime || 0));
+    const todayStr = new Date().toISOString().split('T')[0];
+    const isExemptToday = user.clickerDailyLimitExemptDate === todayStr;
+    const isDailyLimitActive = !isExemptToday && user.isClickerDailyLimitActive && (now < (user.clickerDailyLimitEndTime || 0));
     let dailyLimitRemainingMinutes = 0;
     if (isDailyLimitActive && user.clickerDailyLimitEndTime) {
       dailyLimitRemainingMinutes = Math.max(0, Math.ceil((user.clickerDailyLimitEndTime - now) / 60000));
@@ -3306,7 +3309,7 @@ app.post('/api/clicker-profile', async (req, res) => {
         appVersion: user.clickerAppVersion || app_version || '1.0.3',
         // 12-Hour Block Info
         isDailyLimitActive: isDailyLimitActive,
-        dailyLimitEndTime: user.clickerDailyLimitEndTime || 0,
+        dailyLimitEndTime: isDailyLimitActive ? (user.clickerDailyLimitEndTime || 0) : 0,
         dailyLimitRemainingMinutes: dailyLimitRemainingMinutes,
         dailyTripCount: user.clickerDailyTripCount || 0,
         dailyEarnings: user.clickerDailyEarnings || 0,
@@ -3360,6 +3363,7 @@ app.post('/api/update-clicker-trip', async (req, res) => {
       user.clickerDailyLimitDate = todayStr;
       user.isClickerDailyLimitActive = false;
       user.clickerDailyLimitEndTime = 0;
+      user.clickerDailyLimitExemptDate = ''; // Reset daily exemption on new calendar day
     }
 
     // Check if 12hr block expired
@@ -3382,8 +3386,10 @@ app.post('/api/update-clicker-trip', async (req, res) => {
     const DAILY_EARNING_LIMIT = 1000;
     const BLOCK_DURATION_MS = 12 * 60 * 60 * 1000; // 12 hours
 
+    const isExemptToday = user.clickerDailyLimitExemptDate === todayStr;
+
     let dailyLimitJustReached = false;
-    if (!user.isClickerDailyLimitActive && (user.clickerDailyTripCount >= DAILY_TRIP_LIMIT || user.clickerDailyEarnings >= DAILY_EARNING_LIMIT)) {
+    if (!isExemptToday && !user.isClickerDailyLimitActive && (user.clickerDailyTripCount >= DAILY_TRIP_LIMIT || user.clickerDailyEarnings >= DAILY_EARNING_LIMIT)) {
       user.isClickerDailyLimitActive = true;
       user.clickerDailyLimitEndTime = Date.now() + BLOCK_DURATION_MS;
       dailyLimitJustReached = true;
@@ -3399,12 +3405,14 @@ app.post('/api/update-clicker-trip', async (req, res) => {
 
     await user.save();
 
+    const isDailyActiveResponse = !isExemptToday && user.isClickerDailyLimitActive;
+
     res.status(200).json({ 
       status: 'success', 
       accepted_trips: user.autoClickerTrips,
       is_blocked: false, // 20-trip auto block removed completely!
-      daily_limit_active: user.isClickerDailyLimitActive,
-      daily_limit_end_time: user.clickerDailyLimitEndTime || 0,
+      daily_limit_active: isDailyActiveResponse,
+      daily_limit_end_time: isDailyActiveResponse ? (user.clickerDailyLimitEndTime || 0) : 0,
       daily_trip_count: user.clickerDailyTripCount || 0,
       daily_earnings: user.clickerDailyEarnings || 0,
       message: dailyLimitJustReached ? 'Daily limit reached! 12 hour cooldown active.' : 'Trip count updated'
@@ -3423,7 +3431,9 @@ app.get('/api/admin/clicker-users', async (req, res) => {
     const formatted = users.map(user => {
       const roomName = 'clicker_' + user.autoClickerId;
       const isOnline = io.sockets.adapter.rooms.has(roomName) && io.sockets.adapter.rooms.get(roomName).size > 0;
-      const isDailyLimitActive = user.isClickerDailyLimitActive && (Date.now() < (user.clickerDailyLimitEndTime || 0));
+      const todayStr = new Date().toISOString().split('T')[0];
+      const isExemptToday = user.clickerDailyLimitExemptDate === todayStr;
+      const isDailyLimitActive = !isExemptToday && user.isClickerDailyLimitActive && (Date.now() < (user.clickerDailyLimitEndTime || 0));
       return {
         id: user.uid,
         name: user.fullName || 'Unknown',
@@ -3438,7 +3448,8 @@ app.get('/api/admin/clicker-users', async (req, res) => {
         dailyTrips: user.clickerDailyTripCount || 0,
         dailyEarnings: user.clickerDailyEarnings || 0,
         isDailyLimitActive: isDailyLimitActive,
-        dailyLimitEndTime: user.clickerDailyLimitEndTime || 0
+        dailyLimitEndTime: isDailyLimitActive ? (user.clickerDailyLimitEndTime || 0) : 0,
+        isExemptToday: isExemptToday
       };
     });
 
@@ -3596,11 +3607,13 @@ app.post('/api/admin/clicker-users/:driverId/remove-daily-limit', async (req, re
     });
     if (!user) return res.status(404).json({ error: 'User not found' });
 
+    const todayStr = new Date().toISOString().split('T')[0];
     user.isClickerDailyLimitActive = false;
     user.clickerDailyLimitEndTime = 0;
+    user.clickerDailyLimitExemptDate = todayStr;
     await user.save();
 
-    console.log(`[Admin] 12-hour block removed for driver ${user.fullName} (${user.autoClickerId})`);
+    console.log(`[Admin] 12-hour block removed for driver ${user.fullName} (${user.autoClickerId}), exempted for ${todayStr}`);
 
     // Emit realtime socket unlock event to user's AutoClicker app
     if (user.autoClickerId) {
@@ -3609,6 +3622,16 @@ app.post('/api/admin/clicker-users/:driverId/remove-daily-limit', async (req, re
         driverId: user.autoClickerId,
         message: 'Your 12-hour block has been removed by Admin. You can now use AutoClicker.'
       });
+    }
+
+    // Also send FCM push notification to driver's phone
+    if (user.uid) {
+      await sendDriverFCM(
+        user.uid,
+        'Auto Clicker - 12 மணி நேர பிளாக் நீக்கப்பட்டது! ✅',
+        'அட்மின் உங்கள் பிளாக்கை நீக்கிவிட்டார். இப்போது AutoClicker-ஐ நீங்கள் பயன்படுத்தலாம்.',
+        { type: 'dailyLimitRemoved', driverId: user.autoClickerId || '' }
+      );
     }
 
     res.json({
