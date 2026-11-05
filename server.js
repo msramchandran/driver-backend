@@ -152,7 +152,57 @@ const userSchema = new mongoose.Schema({
   adWatchCount: { type: Number, default: 0 },
 });
 
+// Enforce unique index for non-empty autoClickerId
+userSchema.index(
+  { autoClickerId: 1 },
+  { unique: true, partialFilterExpression: { autoClickerId: { $type: 'string', $gt: '' } } }
+);
+
 const User = mongoose.model('User', userSchema);
+
+// ─── Clicker ID Atomic Counter Schema & Model ────────────────────────────────
+const clickerCounterSchema = new mongoose.Schema({
+  _id: { type: String, required: true },
+  seq: { type: Number, default: 10000 },
+});
+const ClickerCounter = mongoose.model('ClickerCounter', clickerCounterSchema);
+
+/**
+ * Generates a guaranteed 100% unique Auto Clicker ID using MongoDB atomic $inc.
+ * Thread-safe and race-condition proof.
+ */
+async function generateUniqueClickerId() {
+  let counter = await ClickerCounter.findOneAndUpdate(
+    { _id: 'clicker_id_seq' },
+    { $inc: { seq: 1 } },
+    { new: true, upsert: true }
+  );
+
+  // Guarantee sequence starts at least at 10001 (never collides with legacy 4-digit IDs)
+  if (counter.seq < 10000) {
+    counter = await ClickerCounter.findOneAndUpdate(
+      { _id: 'clicker_id_seq' },
+      { $set: { seq: 10001 } },
+      { new: true }
+    );
+  }
+
+  let candidateId = `AZ-CLK-${counter.seq}`;
+
+  // Double safety verification against User collection
+  let exists = await User.findOne({ autoClickerId: candidateId });
+  while (exists) {
+    counter = await ClickerCounter.findOneAndUpdate(
+      { _id: 'clicker_id_seq' },
+      { $inc: { seq: 1 } },
+      { new: true }
+    );
+    candidateId = `AZ-CLK-${counter.seq}`;
+    exists = await User.findOne({ autoClickerId: candidateId });
+  }
+
+  return candidateId;
+}
 
 // ─── Auto Clicker ID Migration (runs after User model is ready) ───────────────
 async function generateMissingClickerIds() {
@@ -172,7 +222,7 @@ async function generateMissingClickerIds() {
     console.log(`[ClickerMigration] Found ${driversWithoutId.length} drivers without IDs. Generating...`);
     const results = [];
     for (const driver of driversWithoutId) {
-      driver.autoClickerId = 'AZ-CLK-' + Math.floor(1000 + Math.random() * 9000);
+      driver.autoClickerId = await generateUniqueClickerId();
       await driver.save();
       results.push({ uid: driver.uid, name: driver.fullName, id: driver.autoClickerId });
       console.log(`[ClickerMigration] ✅ ${driver.fullName} → ${driver.autoClickerId}`);
@@ -542,7 +592,7 @@ app.get('/user/:uid', async (req, res) => {
 
       // Auto-generate clicker ID for existing active drivers
       if (user.status === 'active' && !user.autoClickerId) {
-        user.autoClickerId = 'AZ-CLK-' + Math.floor(1000 + Math.random() * 9000);
+        user.autoClickerId = await generateUniqueClickerId();
         console.log(`[Auto Clicker] Generated ID ${user.autoClickerId} for existing active driver ${user.uid}`);
       }
 
@@ -806,122 +856,204 @@ app.post('/api/admin/customers/:customerId/unblock', async (req, res) => {
   }
 });
 
-// 🆕 Admin API - Get all registered drivers
+// ─── Helper: Format a single user document for admin driver list ─────────────
+async function formatDriverForAdmin(user) {
+  // Run all 3 duplicate checks in parallel (3 queries → 1 round trip each)
+  const [vcCount, dlCount, idCount] = await Promise.all([
+    user.vehicleNumber && user.vehicleNumber !== 'N/A'
+      ? User.countDocuments({ uid: { $ne: user.uid }, vehicleNumber: user.vehicleNumber, isRegistered: true })
+      : Promise.resolve(0),
+    user.dlNumber && user.dlNumber !== 'N/A'
+      ? User.countDocuments({ uid: { $ne: user.uid }, dlNumber: user.dlNumber, isRegistered: true })
+      : Promise.resolve(0),
+    user.idNumber && user.idNumber !== 'N/A'
+      ? User.countDocuments({ uid: { $ne: user.uid }, idNumber: user.idNumber, isRegistered: true })
+      : Promise.resolve(0),
+  ]);
+
+  const duplicates = {
+    vehicleNumber: vcCount > 0,
+    dlNumber: dlCount > 0,
+    idNumber: idCount > 0,
+  };
+
+  // Fetch driver ratings from Ride collection
+  const driverRides = await Ride.find({ driverUid: user.uid, rating: { $gt: 0 } });
+  const totalRatings = driverRides.length;
+  let averageRating = 0;
+  let goodReasons = [], badReasons = [];
+  const goodReasonCounts = {}, badReasonCounts = {};
+
+  if (totalRatings > 0) {
+    let sum = 0;
+    driverRides.forEach(r => {
+      sum += r.rating;
+      if (r.ratingReason) {
+        const reasons = r.ratingReason.split(',').map(s => s.trim()).filter(s => s);
+        reasons.forEach(reason => {
+          if (r.rating < 3) {
+            badReasonCounts[reason] = (badReasonCounts[reason] || 0) + 1;
+          } else {
+            goodReasonCounts[reason] = (goodReasonCounts[reason] || 0) + 1;
+          }
+        });
+      }
+    });
+    averageRating = Number((sum / totalRatings).toFixed(1));
+    goodReasons = Object.entries(goodReasonCounts).map(([reason, count]) => ({ reason, count }));
+    badReasons  = Object.entries(badReasonCounts).map(([reason, count]) => ({ reason, count }));
+  }
+
+  return {
+    id: user.uid,
+    name: user.fullName || 'Unknown Driver',
+    phone: user.phone || 'N/A',
+    email: user.email || '',
+    authProvider: user.email ? 'Google' : 'Phone',
+    autoVariant: user.selectedVehicle || 'Auto',
+    regNumber: user.vehicleNumber || 'N/A',
+    status: user.status || 'pending',
+    forceUpdate: user.forceUpdate || false,
+    appVersion: user.appVersion || '1.0.0',
+    profileImage: user.profileImageUrl || 'https://via.placeholder.com/150',
+    licensePath: user.dlNumber || 'N/A',
+    aadharNumber: user.idNumber || 'N/A',
+    dlFront: user.dlFrontUrl || '',
+    dlBack: user.dlBackUrl || '',
+    rcFront: user.rcFrontUrl || '',
+    rcBack: user.rcBackUrl || '',
+    idFront: user.idFrontUrl || '',
+    idBack: user.idBackUrl || '',
+    duplicates,
+    averageRating,
+    totalRatings,
+    goodReasons,
+    badReasons,
+    clickerId: user.autoClickerId || '',
+    clickerTrips: user.autoClickerTrips || 0,
+    isClickerBlocked: user.isAutoClickerBlocked || false,
+  };
+}
+
+// 🆕 Admin API - Get registered drivers (paginated, filtered, searchable)
 app.get('/api/admin/drivers', async (req, res) => {
   try {
-    const users = await User.find({ isRegistered: true });
-    
-    // Self-healing: Auto-generate missing Clicker IDs for active drivers when admin views them
-    for (let user of users) {
-      if (user.status === 'active' && !user.autoClickerId) {
-        user.autoClickerId = 'AZ-CLK-' + Math.floor(1000 + Math.random() * 9000);
-        console.log(`[Auto Clicker Admin] Generated missing ID ${user.autoClickerId} for driver ${user.uid}`);
-        await user.save();
+    const page         = Math.max(1, parseInt(req.query.page)  || 1);
+    const limit        = Math.min(50, Math.max(1, parseInt(req.query.limit) || 20));
+    const statusFilter = req.query.status || 'all';
+    const search       = (req.query.search || '').trim();
+    const skip         = (page - 1) * limit;
+
+    // ─── Build base MongoDB filter ────────────────────────────────────────────
+    const baseFilter = { isRegistered: true };
+    if (search) {
+      baseFilter.$or = [
+        { fullName:      { $regex: search, $options: 'i' } },
+        { phone:         { $regex: search, $options: 'i' } },
+        { vehicleNumber: { $regex: search, $options: 'i' } },
+        { email:         { $regex: search, $options: 'i' } },
+      ];
+    }
+
+    // ─── Build paginated query filter ─────────────────────────────────────────
+    const queryFilter = { ...baseFilter };
+    const isRatingFilter = ['good_rating', 'bad_rating'].includes(statusFilter);
+
+    if (!isRatingFilter) {
+      if (['pending', 'active', 'blocked', 'rejected'].includes(statusFilter)) {
+        queryFilter.status = statusFilter;
+      } else if (statusFilter === 'update_pending') {
+        queryFilter.forceUpdate = true;
+      } else if (statusFilter === 'outdated') {
+        queryFilter.appVersion = { $ne: '1.0.1' };
+      } else if (statusFilter === 'updated') {
+        queryFilter.appVersion = '1.0.1';
       }
     }
 
-    const formatted = await Promise.all(users.map(async (user) => {
-      const duplicates = {
-        vehicleNumber: false,
-        dlNumber: false,
-        idNumber: false,
-      };
+    // ─── Status counts + rating aggregation (all run in parallel) ─────────────
+    const [
+      allCount, pendingCount, activeCount, blockedCount, rejectedCount,
+      updatePendingCount, outdatedCount, updatedCount, ratingAgg,
+    ] = await Promise.all([
+      User.countDocuments({ ...baseFilter }),
+      User.countDocuments({ ...baseFilter, status: 'pending' }),
+      User.countDocuments({ ...baseFilter, status: 'active' }),
+      User.countDocuments({ ...baseFilter, status: 'blocked' }),
+      User.countDocuments({ ...baseFilter, status: 'rejected' }),
+      User.countDocuments({ ...baseFilter, forceUpdate: true }),
+      User.countDocuments({ ...baseFilter, appVersion: { $ne: '1.0.1' } }),
+      User.countDocuments({ ...baseFilter, appVersion: '1.0.1' }),
+      // Single aggregation for rating counts (much cheaper than per-user queries)
+      Ride.aggregate([
+        { $match: { rating: { $gt: 0 } } },
+        { $group: { _id: '$driverUid', avgRating: { $avg: '$rating' } } },
+      ]),
+    ]);
 
-      // Check duplicate vehicleNumber
-      if (user.vehicleNumber && user.vehicleNumber !== 'N/A') {
-        const count = await User.countDocuments({
-          uid: { $ne: user.uid },
-          vehicleNumber: user.vehicleNumber,
-          isRegistered: true,
-        });
-        if (count > 0) duplicates.vehicleNumber = true;
+    // Build uid→avgRating lookup map (used for rating filter too)
+    const ratingMap = {};
+    ratingAgg.forEach(r => { ratingMap[r._id] = r.avgRating; });
+
+    const goodRatingCount = ratingAgg.filter(r => r.avgRating >= 3.0).length;
+    const badRatingCount  = ratingAgg.filter(r => r.avgRating > 0 && r.avgRating < 3.0).length;
+
+    const statusCounts = {
+      all: allCount, pending: pendingCount, active: activeCount,
+      blocked: blockedCount, rejected: rejectedCount,
+      update_pending: updatePendingCount, outdated: outdatedCount,
+      updated: updatedCount, good_rating: goodRatingCount, bad_rating: badRatingCount,
+    };
+
+    // ─── Fetch & paginate users ───────────────────────────────────────────────
+    let users;
+    let totalCount;
+
+    if (isRatingFilter) {
+      // Rating filters require computed averageRating — fetch all, filter, then slice
+      const allUsers = await User.find(baseFilter).lean();
+      const filtered = allUsers.filter(u => {
+        const avg = ratingMap[u.uid] || 0;
+        return statusFilter === 'good_rating'
+          ? avg >= 3.0
+          : avg > 0 && avg < 3.0;
+      });
+      totalCount = filtered.length;
+      users = filtered.slice(skip, skip + limit);
+    } else {
+      [totalCount, users] = await Promise.all([
+        User.countDocuments(queryFilter),
+        User.find(queryFilter)
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(limit)
+          .lean(),
+      ]);
+    }
+
+    // ─── Self-healing: auto-generate missing Clicker IDs (current page only) ─
+    for (const user of users) {
+      if (user.status === 'active' && !user.autoClickerId) {
+        const generatedId = await generateUniqueClickerId();
+        await User.updateOne({ uid: user.uid }, { $set: { autoClickerId: generatedId } });
+        user.autoClickerId = generatedId;
+        console.log(`[Auto Clicker Admin] Generated missing ID ${generatedId} for driver ${user.uid}`);
       }
+    }
 
-      // Check duplicate dlNumber
-      if (user.dlNumber && user.dlNumber !== 'N/A') {
-        const count = await User.countDocuments({
-          uid: { $ne: user.uid },
-          dlNumber: user.dlNumber,
-          isRegistered: true,
-        });
-        if (count > 0) duplicates.dlNumber = true;
-      }
+    // ─── Format only current-page users (heavy work on 20 drivers, not 150+) ─
+    const formatted = await Promise.all(users.map(user => formatDriverForAdmin(user)));
 
-      // Check duplicate idNumber (Aadhaar/PAN)
-      if (user.idNumber && user.idNumber !== 'N/A') {
-        const count = await User.countDocuments({
-          uid: { $ne: user.uid },
-          idNumber: user.idNumber,
-          isRegistered: true,
-        });
-        if (count > 0) duplicates.idNumber = true;
-      }
-
-      // Fetch driver ratings from Ride collection
-      const driverRides = await Ride.find({ driverUid: user.uid, rating: { $gt: 0 } });
-      let totalRatings = driverRides.length;
-      let averageRating = 0;
-      let goodReasons = [];
-      let badReasons = [];
-      let goodReasonCounts = {};
-      let badReasonCounts = {};
-
-      if (totalRatings > 0) {
-        let sum = 0;
-        driverRides.forEach(r => {
-          sum += r.rating;
-          if (r.ratingReason) {
-            const reasons = r.ratingReason.split(',').map(s => s.trim()).filter(s => s);
-            reasons.forEach(reason => {
-              if (r.rating < 3) {
-                badReasonCounts[reason] = (badReasonCounts[reason] || 0) + 1;
-              } else {
-                goodReasonCounts[reason] = (goodReasonCounts[reason] || 0) + 1;
-              }
-            });
-          }
-        });
-        averageRating = Number((sum / totalRatings).toFixed(1));
-        
-        // Convert to array of objects
-        goodReasons = Object.entries(goodReasonCounts).map(([reason, count]) => ({ reason, count }));
-        badReasons = Object.entries(badReasonCounts).map(([reason, count]) => ({ reason, count }));
-      }
-
-      return {
-        id: user.uid,
-        name: user.fullName || 'Unknown Driver',
-        phone: user.phone || 'N/A',
-        email: user.email || '',
-        authProvider: user.email ? 'Google' : 'Phone',
-        autoVariant: user.selectedVehicle || 'Auto',
-        regNumber: user.vehicleNumber || 'N/A',
-        status: user.status || 'pending',
-        forceUpdate: user.forceUpdate || false,
-        appVersion: user.appVersion || '1.0.0',
-        profileImage: user.profileImageUrl || 'https://via.placeholder.com/150',
-        licensePath: user.dlNumber || 'N/A',
-        aadharNumber: user.idNumber || 'N/A',
-        dlFront: user.dlFrontUrl || '',
-        dlBack: user.dlBackUrl || '',
-        rcFront: user.rcFrontUrl || '',
-        rcBack: user.rcBackUrl || '',
-        idFront: user.idFrontUrl || '',
-        idBack: user.idBackUrl || '',
-        duplicates,
-        averageRating,
-        totalRatings,
-        goodReasons,
-        badReasons,
-        clickerId: user.autoClickerId || '',
-        clickerTrips: user.autoClickerTrips || 0,
-        isClickerBlocked: user.isAutoClickerBlocked || false,
-      };
-    }));
-
-    res.status(200).json(formatted);
+    res.status(200).json({
+      drivers:     formatted,
+      totalCount,
+      totalPages:  Math.ceil(totalCount / limit),
+      currentPage: page,
+      limit,
+      statusCounts,
+    });
   } catch (error) {
-    console.error("❌ Get Drivers API Error:", error);
+    console.error('❌ Get Drivers API Error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -939,8 +1071,7 @@ app.put('/api/admin/drivers/:driverId/status', async (req, res) => {
     if (status === 'active') {
       const existingUser = await User.findOne({ uid: driverId });
       if (existingUser && !existingUser.autoClickerId) {
-        // e.g. AZ-CLK-8472
-        updateFields.autoClickerId = 'AZ-CLK-' + Math.floor(1000 + Math.random() * 9000);
+        updateFields.autoClickerId = await generateUniqueClickerId();
       }
     }
 
