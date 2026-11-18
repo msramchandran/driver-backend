@@ -3292,21 +3292,63 @@ app.put('/api/admin/tutorial-videos/:id/toggle', async (req, res) => {
 // 1. Auto Clicker Login API
 app.post('/api/clicker-login', async (req, res) => {
   try {
-    const { driver_id, device_id, app_version } = req.body;
-    if (!driver_id) {
-      return res.status(400).json({ status: 'error', message: 'Driver Auto Clicker ID is required' });
+    const { driver_id, device_id, app_version, name, phone } = req.body;
+    const inputId = (phone || driver_id || '').toString().trim();
+    const inputName = (name || '').toString().trim();
+
+    if (!inputId) {
+      return res.status(400).json({ status: 'error', message: 'Mobile Number is required for login' });
     }
     if (!device_id) {
       return res.status(400).json({ status: 'error', message: 'Device ID is required for login' });
     }
 
-    const user = await User.findOne({ autoClickerId: driver_id });
-    if (!user) {
-      return res.status(404).json({ status: 'error', message: 'Invalid Auto Clicker ID' });
-    }
+    const is10DigitMobile = /^\d{10}$/.test(inputId);
+    let user = null;
 
-    if (user.status !== 'active') {
-      return res.status(403).json({ status: 'error', message: 'Your driver profile is not active. Please contact Admin.' });
+    if (is10DigitMobile) {
+      // 10-Digit Mobile Login flow (New App flow)
+      user = await User.findOne({
+        $or: [{ phone: inputId }, { autoClickerId: inputId }, { uid: inputId }]
+      });
+
+      if (!user) {
+        // Auto-create new user account in MongoDB
+        user = new User({
+          uid: inputId, // Mobile number IS the ID!
+          phone: inputId,
+          fullName: inputName || 'Driver',
+          autoClickerId: inputId, // Mobile number itself is the ID!
+          status: 'active',
+          isRegistered: true,
+          clickerDeviceId: device_id,
+          clickerAppVersion: app_version || '1.0.0',
+          hasPaidForClicker: false,
+          isAutoClickerBlocked: false,
+          autoClickerTrips: 0
+        });
+      } else {
+        // Existing user: update name if provided
+        if (inputName) {
+          user.fullName = inputName;
+        }
+        if (!user.autoClickerId) {
+          user.autoClickerId = inputId;
+        }
+        if (user.status !== 'active') {
+          user.status = 'active';
+        }
+      }
+    } else {
+      // Backward Compatibility: Old Driver ID flow (strictly for older app versions)
+      user = await User.findOne({ autoClickerId: inputId });
+      if (!user) {
+        return res.status(404).json({ status: 'error', message: 'Invalid Auto Clicker ID' });
+      }
+
+      if (user.status !== 'active') {
+        return res.status(403).json({ status: 'error', message: 'Your driver profile is not active. Please contact Admin.' });
+      }
     }
 
     if (user.isAutoClickerBlocked) {
@@ -3326,8 +3368,10 @@ app.post('/api/clicker-login', async (req, res) => {
       });
     }
 
+    // Single Device Restriction: Force logout previously active device
+    const activeRoom = 'clicker_' + (user.autoClickerId || user.phone || inputId);
     if (user.clickerDeviceId && user.clickerDeviceId !== device_id) {
-      io.to('clicker_' + driver_id).emit('forceLogout', { message: 'Logged in from another device. You have been logged out.' });
+      io.to(activeRoom).emit('forceLogout', { message: 'Logged in from another device. You have been logged out.' });
     }
 
     user.clickerDeviceId = device_id;
@@ -3340,7 +3384,9 @@ app.post('/api/clicker-login', async (req, res) => {
       status: 'success', 
       message: 'Login successful',
       profile: {
-        name: user.fullName || 'Driver',
+        name: user.fullName || inputName || 'Driver',
+        phone: user.phone || inputId,
+        clickerId: user.phone || user.autoClickerId || inputId,
         profilePic: user.profileImageUrl || '',
         vehicleNumber: user.vehicleNumber || 'N/A',
         acceptedTrips: user.autoClickerTrips || 0,
@@ -3367,7 +3413,7 @@ app.post('/api/clicker-profile', async (req, res) => {
     }
 
     const user = await User.findOne({
-      $or: [{ autoClickerId: driver_id }, { uid: driver_id }]
+      $or: [{ autoClickerId: driver_id }, { phone: driver_id }, { uid: driver_id }]
     });
     if (!user) {
       return res.status(404).json({ status: 'error', message: 'Invalid Auto Clicker ID' });
@@ -3392,43 +3438,29 @@ app.post('/api/clicker-profile', async (req, res) => {
       user.clickerAppVersion = app_version;
     }
 
-    const now = Date.now();
-
     await user.save();
-
-    // 6-Hour AD Pass Calculations
-    const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
-    let isAdPassActive = false;
-    let adPassHoursRemaining = 0;
-    if (user.lastAdWatchedAt) {
-      const elapsed = now - new Date(user.lastAdWatchedAt).getTime();
-      if (elapsed < SIX_HOURS_MS) {
-        isAdPassActive = true;
-        adPassHoursRemaining = parseFloat(((SIX_HOURS_MS - elapsed) / (60 * 60 * 1000)).toFixed(1));
-      }
-    }
 
     res.status(200).json({
       status: 'success',
       profile: {
         name: user.fullName || 'Driver',
-        phone: user.phone || 'N/A',
-        clickerId: user.autoClickerId || driver_id,
+        phone: user.phone || driver_id,
+        clickerId: user.phone || user.autoClickerId || driver_id,
         profilePic: user.profileImageUrl || '',
         vehicleNumber: user.vehicleNumber || 'N/A',
         acceptedTrips: user.autoClickerTrips || 0,
         hasPaidForClicker: user.hasPaidForClicker || false,
         isBlocked: user.isAutoClickerBlocked || false,
         appVersion: user.clickerAppVersion || app_version || '1.0.3',
-        // 12-Hour Block Info (removed — no longer active)
+        // 12-Hour Block Info (removed)
         isDailyLimitActive: false,
         dailyLimitEndTime: 0,
         dailyLimitRemainingMinutes: 0,
         dailyTripCount: user.clickerDailyTripCount || 0,
         dailyEarnings: user.clickerDailyEarnings || 0,
-        // 6-Hour AD Pass Info
-        isAdPassActive: isAdPassActive,
-        adPassHoursRemaining: adPassHoursRemaining,
+        // 6-Hour AD Pass permanently active (no ad watch required)
+        isAdPassActive: true,
+        adPassHoursRemaining: 9999,
         lastAdWatchedAt: user.lastAdWatchedAt || null,
         adWatchCount: user.adWatchCount || 0
       }
@@ -3506,16 +3538,22 @@ app.post('/api/update-clicker-trip', async (req, res) => {
 // 3. Admin API: Get all Auto Clicker Users (Includes App Version & Daily Limits)
 app.get('/api/admin/clicker-users', async (req, res) => {
   try {
-    const users = await User.find({ autoClickerId: { $ne: '' }, autoClickerId: { $exists: true } });
+    const users = await User.find({
+      $or: [
+        { autoClickerId: { $ne: '', $exists: true } },
+        { phone: { $ne: '', $exists: true } }
+      ]
+    });
     
     const formatted = users.map(user => {
-      const roomName = 'clicker_' + user.autoClickerId;
+      const clickerId = user.phone || user.autoClickerId || user.uid;
+      const roomName = 'clicker_' + (user.autoClickerId || user.phone);
       const isOnline = io.sockets.adapter.rooms.has(roomName) && io.sockets.adapter.rooms.get(roomName).size > 0;
       return {
-        id: user.uid,
+        id: user.uid || user.phone || user.autoClickerId,
         name: user.fullName || 'Unknown',
         phone: user.phone || 'N/A',
-        clickerId: user.autoClickerId,
+        clickerId: clickerId,
         acceptedTrips: user.autoClickerTrips || 0,
         hasPaidForClicker: user.hasPaidForClicker || false,
         clickerPaymentScreenshot: user.clickerPaymentScreenshot || '',
@@ -3541,14 +3579,14 @@ app.get('/api/admin/clicker-users', async (req, res) => {
 app.post('/api/admin/clicker-users/:driverId/toggle-block', async (req, res) => {
   try {
     const { driverId } = req.params;
-    const user = await User.findOne({ $or: [{ uid: driverId }, { autoClickerId: driverId }] });
+    const user = await User.findOne({ $or: [{ uid: driverId }, { autoClickerId: driverId }, { phone: driverId }] });
     if (!user) return res.status(404).json({ error: 'Driver not found' });
 
     user.isAutoClickerBlocked = !user.isAutoClickerBlocked;
     await user.save();
     
     // Notify flutter app socket
-    io.to('clicker_' + user.autoClickerId).emit('clickerBlockStatus', { isBlocked: user.isAutoClickerBlocked });
+    io.to('clicker_' + (user.autoClickerId || user.phone)).emit('clickerBlockStatus', { isBlocked: user.isAutoClickerBlocked });
     
     res.status(200).json({ message: 'Auto Clicker block status toggled', isBlocked: user.isAutoClickerBlocked });
   } catch (error) {
@@ -3561,19 +3599,19 @@ app.post('/api/admin/clicker-users/:driverId/toggle-block', async (req, res) => 
 app.post('/api/admin/clicker-users/:driverId/trigger-free-trial-end', async (req, res) => {
   try {
     const { driverId } = req.params;
-    const user = await User.findOne({ $or: [{ uid: driverId }, { autoClickerId: driverId }] });
+    const user = await User.findOne({ $or: [{ uid: driverId }, { autoClickerId: driverId }, { phone: driverId }] });
     if (!user) return res.status(404).json({ error: 'Driver not found' });
 
     user.hasPaidForClicker = false;
     await user.save();
 
     // Emit event directly to driver app room
-    io.to('clicker_' + user.autoClickerId).emit('clickerFreeTrialEnd', {
+    io.to('clicker_' + (user.autoClickerId || user.phone)).emit('clickerFreeTrialEnd', {
       message: 'Your free trial has ended. Please pay to continue using AutoClicker.'
     });
 
-    console.log(`[FreeTrialEnd] Triggered for ${user.autoClickerId} (${user.fullName})`);
-    res.status(200).json({ success: true, message: `Free trial end triggered for ${user.autoClickerId}` });
+    console.log(`[FreeTrialEnd] Triggered for ${user.autoClickerId || user.phone} (${user.fullName})`);
+    res.status(200).json({ success: true, message: `Free trial end triggered for ${user.autoClickerId || user.phone}` });
   } catch (error) {
     console.error('❌ Trigger Free Trial End Error:', error);
     res.status(500).json({ error: error.message });
@@ -3663,7 +3701,7 @@ server.listen(PORT, () => {
 // --- AUTO CLICKER ADMIN APIS ---
 app.post('/api/admin/clicker-users/:driverId/update-trips', async (req, res) => {
   try {
-    const user = await User.findOne({ uid: req.params.driverId });
+    const user = await User.findOne({ $or: [{ uid: req.params.driverId }, { autoClickerId: req.params.driverId }, { phone: req.params.driverId }] });
     if (!user) return res.status(404).json({ error: 'User not found' });
     user.autoClickerTrips = req.body.trips;
     await user.save();
@@ -3675,7 +3713,7 @@ app.post('/api/admin/clicker-users/:driverId/update-trips', async (req, res) => 
 
 app.post('/api/admin/clicker-users/:driverId/toggle-payment', async (req, res) => {
   try {
-    const user = await User.findOne({ uid: req.params.driverId });
+    const user = await User.findOne({ $or: [{ uid: req.params.driverId }, { autoClickerId: req.params.driverId }, { phone: req.params.driverId }] });
     if (!user) return res.status(404).json({ error: 'User not found' });
     user.hasPaidForClicker = !user.hasPaidForClicker;
     
@@ -3685,7 +3723,7 @@ app.post('/api/admin/clicker-users/:driverId/toggle-payment', async (req, res) =
     }
     
     await user.save();
-    io.to('clicker_' + user.autoClickerId).emit('clickerPaymentStatus', {
+    io.to('clicker_' + (user.autoClickerId || user.phone)).emit('clickerPaymentStatus', {
       status: user.hasPaidForClicker ? 'paid' : 'unpaid'
     });
     res.json({ success: true, hasPaidForClicker: user.hasPaidForClicker });
@@ -3697,7 +3735,7 @@ app.post('/api/admin/clicker-users/:driverId/toggle-payment', async (req, res) =
 app.post('/api/clicker-payment/upload', upload.single('screenshot'), async (req, res) => {
   try {
     const { driver_id } = req.body;
-    const user = await User.findOne({ autoClickerId: driver_id });
+    const user = await User.findOne({ $or: [{ autoClickerId: driver_id }, { phone: driver_id }, { uid: driver_id }] });
     if (!user) return res.status(404).json({ error: 'User not found' });
     user.clickerPaymentScreenshot = req.file.path;
     await user.save();
