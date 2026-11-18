@@ -201,42 +201,7 @@ async function generateUniqueClickerId() {
   return candidateId;
 }
 
-// ─── Auto Clicker ID Migration (runs after User model is ready) ───────────────
-async function generateMissingClickerIds() {
-  try {
-    const driversWithoutId = await User.find({
-      status: 'active',
-      $or: [
-        { autoClickerId: { $exists: false } },
-        { autoClickerId: '' },
-        { autoClickerId: null }
-      ]
-    });
-    if (driversWithoutId.length === 0) {
-      console.log('[ClickerMigration] ✅ All active drivers already have Clicker IDs.');
-      return { updated: 0 };
-    }
-    console.log(`[ClickerMigration] Found ${driversWithoutId.length} drivers without IDs. Generating...`);
-    const results = [];
-    for (const driver of driversWithoutId) {
-      driver.autoClickerId = await generateUniqueClickerId();
-      await driver.save();
-      results.push({ uid: driver.uid, name: driver.fullName, id: driver.autoClickerId });
-      console.log(`[ClickerMigration] ✅ ${driver.fullName} → ${driver.autoClickerId}`);
-    }
-    console.log(`[ClickerMigration] 🎉 Done! ${driversWithoutId.length} IDs generated.`);
-    return { updated: driversWithoutId.length, drivers: results };
-  } catch (err) {
-    console.error('[ClickerMigration] ❌ Error:', err.message);
-    throw err;
-  }
-}
 
-// Run migration on startup (User model is now defined)
-setTimeout(() => {
-  generateMissingClickerIds().catch(console.error);
-}, 3000); // 3 second delay to ensure DB connection is fully established
-// ──────────────────────────────────────────────────────────────────────────────
 
 
 // 🆕 APK RELEASE SCHEMA — Persist upload version history
@@ -467,19 +432,12 @@ app.post('/api/user/sync-google-account', async (req, res) => {
 });
 // ====================================================================
 
-// ⚡ One-time Migration: Generate Clicker IDs for all active drivers
-// Call this URL once to fix all existing drivers: GET /api/admin/generate-clicker-ids
+// ⚡ One-time Migration: Clicker IDs generation deprecated
 app.get('/api/admin/generate-clicker-ids', async (req, res) => {
-  try {
-    const result = await generateMissingClickerIds();
-    res.status(200).json({
-      success: true,
-      message: `Migration complete! Generated ${result.updated} Clicker IDs.`,
-      drivers: result.drivers || []
-    });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
+  res.status(200).json({
+    success: true,
+    message: 'Clicker ID generation is disabled. Mobile number is used as the unique ID.'
+  });
 });
 
 // 🔴 Updated Register API with Safety Checks and pending status reset
@@ -587,11 +545,7 @@ app.get('/user/:uid', async (req, res) => {
         console.log(`[Self-Healing] Restored phone number for driver ${user.uid} to ${phone}`);
       }
 
-      // Auto-generate clicker ID for existing active drivers
-      if (user.status === 'active' && !user.autoClickerId) {
-        user.autoClickerId = await generateUniqueClickerId();
-        console.log(`[Auto Clicker] Generated ID ${user.autoClickerId} for existing active driver ${user.uid}`);
-      }
+
 
       await user.save();
       const completedRidesCount = await Ride.countDocuments({ driverUid: req.params.uid, status: 'finished' });
@@ -1028,16 +982,6 @@ app.get('/api/admin/drivers', async (req, res) => {
       ]);
     }
 
-    // ─── Self-healing: auto-generate missing Clicker IDs (current page only) ─
-    for (const user of users) {
-      if (user.status === 'active' && !user.autoClickerId) {
-        const generatedId = await generateUniqueClickerId();
-        await User.updateOne({ uid: user.uid }, { $set: { autoClickerId: generatedId } });
-        user.autoClickerId = generatedId;
-        console.log(`[Auto Clicker Admin] Generated missing ID ${generatedId} for driver ${user.uid}`);
-      }
-    }
-
     // ─── Format only current-page users (heavy work on 20 drivers, not 150+) ─
     const formatted = await Promise.all(users.map(user => formatDriverForAdmin(user)));
 
@@ -1063,14 +1007,7 @@ app.put('/api/admin/drivers/:driverId/status', async (req, res) => {
     if (!['active', 'rejected', 'pending', 'blocked'].includes(status)) {
       return res.status(400).json({ error: "Invalid status" });
     }
-    // Generate auto clicker ID if activating for the first time
     let updateFields = { status };
-    if (status === 'active') {
-      const existingUser = await User.findOne({ uid: driverId });
-      if (existingUser && !existingUser.autoClickerId) {
-        updateFields.autoClickerId = await generateUniqueClickerId();
-      }
-    }
 
     const user = await User.findOneAndUpdate(
       { uid: driverId },
@@ -3364,7 +3301,7 @@ app.post('/api/clicker-login', async (req, res) => {
     if (!app_version || isVersionOlder(app_version, requiredVersion)) {
       return res.status(403).json({
         status: 'error',
-        message: `Your AutoClicker app is outdated (${app_version ? 'v' + app_version : 'Old version'}). Please download the latest update (v${requiredVersion}) from the website to login.`
+        message: `Your AutoClicker app is outdated (${app_version ? 'v' + app_version : 'Old version'}). Download from the Instagram admin link.`
       });
     }
 
@@ -3423,14 +3360,15 @@ app.post('/api/clicker-profile', async (req, res) => {
       return res.status(401).json({ status: 'logout', message: 'Logged in from another device. You have been logged out.' });
     }
 
-    // Strict version check - Auto-logout old APKs!
+    // Strict version check - Outdated APKs require update (NOT logout)
     const config = await getClickerConfig();
     const requiredVersion = config.latestVersion || '1.0.3';
     const effectiveVersion = app_version || user.clickerAppVersion || '1.0.0';
     if (isVersionOlder(effectiveVersion, requiredVersion)) {
       return res.status(200).json({
-        status: 'logout',
-        message: `Your AutoClicker app is outdated (v${effectiveVersion}). Please download the latest update (v${requiredVersion}) from the website to continue.`
+        status: 'update_required',
+        latestVersion: requiredVersion,
+        message: `Your AutoClicker app is outdated (v${effectiveVersion}). Download from the Instagram admin link.`
       });
     }
 
@@ -3480,7 +3418,9 @@ app.post('/api/update-clicker-trip', async (req, res) => {
       return res.status(400).json({ status: 'error', message: 'Driver Auto Clicker ID is required' });
     }
 
-    const user = await User.findOne({ autoClickerId: driver_id });
+    const user = await User.findOne({
+      $or: [{ autoClickerId: driver_id }, { phone: driver_id }, { uid: driver_id }]
+    });
     if (!user) {
       return res.status(404).json({ status: 'error', message: 'Invalid Auto Clicker ID' });
     }
